@@ -37,12 +37,12 @@ app.post('/api/kommo-contacto', async (req, res) => {
     const kommo_huapi_subdominio = process.env.KOMMO_HUAPI_SUBDOMINIO
     const kommo_huapi_token = process.env.KOMMO_HUAPI_TOKEN
     const kommo_huapi_pipeline_id = 9384051
-    const kommo_huapi_pipeline_etapa_id = 72647919
+    const kommo_huapi_pipeline_etapa_id = 83070567
 
     const kommo_tannery_subdominio = process.env.KOMMO_TANNERY_SUBDOMINIO
     const kommo_tannery_token = process.env.KOMMO_TANNERY_TOKEN
-    const kommo_tannery_pipeline_id = 9384051
-    const kommo_tannery_pipeline_etapa_id = 72647919
+    const kommo_tannery_pipeline_id = 9384115
+    const kommo_tannery_pipeline_etapa_id = 83069403
 
     // Lógica para determinar a qué Kommo enviar el contacto: Tannery o Huapi
     const origen = req.headers.origin || req.headers.referer
