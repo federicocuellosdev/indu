@@ -191,7 +191,7 @@ app.post('/api/pazcel', async (req, res) => {
         const transporter = nodemailer.createTransport({
             host: process.env.PAZCEL_SMTP_SERVIDOR,
             port: process.env.PAZCEL_SMTP_PUERTO,
-            secure: false, // true para 465, false para otros puertos
+            secure: true, // true para 465, false para otros puertos
             auth: {
                 user: process.env.PAZCEL_SMTP_CORREO,
                 pass: process.env.PAZCEL_SMTP_PASS,
@@ -201,7 +201,7 @@ app.post('/api/pazcel', async (req, res) => {
         // Contenido del email
         const mailOptions = {
             from: process.env.PAZCEL_SMTP_CORREO,
-            to: 'fedecuellos@gmail.com',
+            to: 'hola@pazcel.com.ar',
             subject: 'Contacto Web',
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
