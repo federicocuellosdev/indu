@@ -12,7 +12,9 @@ app.use(cors({
             'https://huapi.com.ar',
             'https://www.huapi.com.ar',
             'https://tannery.com.ar',
-            'https://www.tannery.com.ar'
+            'https://www.tannery.com.ar',
+            'https://pazcel.com.ar',
+            'https://www.pazcel.com.ar'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
@@ -62,7 +64,7 @@ app.post('/api/kommo-contacto', async (req, res) => {
     if (dominio_normalizado === 'huapi.com.ar') {
         subdominio = kommo_huapi_subdominio
         token = kommo_huapi_token
-        kommo_pipeline_id = kommo_huapi_pipeline_id 
+        kommo_pipeline_id = kommo_huapi_pipeline_id
         kommo_pipeline_etapa_id = kommo_huapi_pipeline_etapa_id
         console.log('Kommo - Destino: HUAPI')
 
@@ -170,6 +172,84 @@ app.post('/api/kommo-contacto', async (req, res) => {
         })
     }
 })
+
+// Pazcel: Ruta para manejar la respuestas del formulario web
+const nodemailer = require('nodemailer') 
+app.post('/api/pazcel', async (req, res) => {
+    try {
+        const { nombre, email, empresa, ciudad, conferencia, desafio } = req.body
+
+        // Validación de datos obligatorios
+        if (!nombre || !email || !empresa || !ciudad || !conferencia || !desafio) {
+            return res.status(400).json({
+                success: false,
+                mensaje: 'Faltan datos obligatorios'
+            })
+        }
+
+        // Configurar el transportador de nodemailer
+        const transporter = nodemailer.createTransport({
+            host: process.env.PAZCEL_SMTP_SERVIDOR,
+            port: process.env.PAZCEL_SMTP_PUERTO,
+            secure: false, // true para 465, false para otros puertos
+            auth: {
+                user: process.env.PAZCEL_SMTP_CORREO,
+                pass: process.env.PAZCEL_SMTP_PASS,
+            },
+        })
+
+        // Contenido del email
+        const mailOptions = {
+            from: process.env.PAZCEL_SMTP_CORREO,
+            to: 'fedecuellos@gmail.com',
+            subject: 'Contacto Web',
+            html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #45c2c6; border-bottom: 3px solid #84c883; padding-bottom: 10px;">
+                        Nueva solicitud de información desde la web
+                    </h2>
+                    
+                    <div style="background-color: #f9f9f9; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                        <p style="margin: 10px 0;"><strong style="color: #45c2c6;">Nombre:</strong> ${nombre}</p>
+                        <p style="margin: 10px 0;"><strong style="color: #45c2c6;">Email:</strong> ${email}</p>
+                        <p style="margin: 10px 0;"><strong style="color: #45c2c6;">Empresa:</strong> ${empresa}</p>
+                        <p style="margin: 10px 0;"><strong style="color: #45c2c6;">Ciudad:</strong> ${ciudad}</p>
+                        <p style="margin: 10px 0;"><strong style="color: #45c2c6;">Conferencia de interés:</strong> ${conferencia}</p>
+                    </div>
+                    
+                    <div style="background-color: #fff; padding: 20px; border-left: 4px solid #84c883; margin: 20px 0;">
+                        <p style="margin: 0 0 10px 0;"><strong style="color: #84c883;">Desafío:</strong></p>
+                        <p style="margin: 0; line-height: 1.6;">${desafio}</p>
+                    </div>
+                    
+                    <p style="color: #666; font-size: 12px; margin-top: 30px;">
+                        Este email fue enviado desde el formulario de contacto de Pazcel
+                    </p>
+                </div>
+            `,
+        }
+
+        // Enviar el email
+        await transporter.sendMail(mailOptions)
+
+        console.log('Pazcel - Email enviado correctamente')
+
+        // Respuesta al cliente
+        res.json({
+            success: true,
+            mensaje: 'Email enviado correctamente'
+        })
+
+    } catch (error) {
+        console.error('Pazcel - Error al enviar email:', error)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al enviar el email',
+            detalles: error.message
+        })
+    }
+})
+
 
 // Iniciar servidor
 app.listen(PORT, () => {
