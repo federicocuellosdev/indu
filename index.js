@@ -179,6 +179,8 @@ app.post('/api/pazcel', async (req, res) => {
     try {
         const { nombre, email, empresa, ciudad, conferencia, desafio } = req.body
 
+        console.log('Pazcel - Datos recibidos:', req.body)
+
         // Validación de datos obligatorios
         if (!nombre || !email || !empresa || !ciudad || !conferencia || !desafio) {
             return res.status(400).json({
