@@ -14,7 +14,9 @@ app.use(cors({
             'https://tannery.com.ar',
             'https://www.tannery.com.ar',
             'https://pazcel.com.ar',
-            'https://www.pazcel.com.ar'
+            'https://www.pazcel.com.ar',
+            'https://breakmkt.com.ar',
+            'https://breakmkt.com.ar/preston/'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
@@ -78,7 +80,7 @@ app.post('/api/kommo-contacto', async (req, res) => {
     } else {
         return res.status(403).json({
             error: 'Dominio no autorizado',
-            dominio: dominioNormalizado
+            dominio: dominio_normalizado
         });
     }
 
@@ -129,7 +131,7 @@ app.post('/api/kommo-contacto', async (req, res) => {
 
         // Lead payload
         const lead_data = {
-            name: `${nombre_completo} - Formulario Web`,
+            name: `${nombre_completo} - Formulario web`,
             pipeline_id: kommo_pipeline_id, // Modificar
             status_id: kommo_pipeline_etapa_id,  // Modificar
             _embedded: {
@@ -173,8 +175,170 @@ app.post('/api/kommo-contacto', async (req, res) => {
     }
 })
 
-// Pazcel: Ruta para manejar la respuestas del formulario web
-const nodemailer = require('nodemailer') 
+// Kommo: Ruta para crear un contacto y un lead en el embudo 'breal' con etiqueta
+app.post('/preston', async (req, res) => {
+    const kommo_preston_subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
+    const kommo_preston_token = process.env.KOMMO_PRESTON_TOKEN
+    const kommo_preston_pipeline_id = 12339992
+    const kommo_preston_pipeline_etapa_id = 95362684
+
+    try {
+        const { nombre_completo, email, telefono, categoria, dni } = req.body
+
+        if (!nombre_completo || !telefono || !categoria) {
+            return res.status(400).json({
+                success: false,
+                mensaje: 'Faltan datos obligatorios: nombre_completo, telefono, categoria'
+            })
+        }
+
+        let dni_normalizado = null;
+        if (dni) {
+            dni_normalizado = dni.replace(/[^0-9]/g, '');
+        }
+
+        const kommo_api = axios.create({
+            baseURL: `https://${kommo_preston_subdominio}.kommo.com/api/v4`,
+            headers: {
+                'Authorization': `Bearer ${kommo_preston_token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+
+        // 1. Crear Contacto
+        const contacto_data = {
+            name: nombre_completo,
+            custom_fields_values: [
+                {
+                    field_code: 'PHONE',
+                    values: [{
+                        enum_code: 'WORK',
+                        value: telefono
+                    }]
+                }
+            ]
+        }
+
+        if (email) {
+            contacto_data.custom_fields_values.push({
+                field_code: 'EMAIL',
+                values: [{
+                    enum_code: 'WORK',
+                    value: email
+                }]
+            });
+        }
+
+        if (dni_normalizado) {
+            contacto_data.custom_fields_values.push({
+                field_id: 1986662,
+                values: [{
+                    value: dni_normalizado
+                }]
+            });
+        }
+
+        const contacto_respuesta = await kommo_api.post('/contacts', [contacto_data])
+        const contacto_id = contacto_respuesta.data._embedded.contacts[0].id
+        console.log('Kommo - Contacto Preston:', contacto_id)
+
+        // 2. Obtener o crear etiqueta
+        let tag_id = null;
+        if (categoria && categoria.trim() !== '') {
+            try {
+                // Buscar la etiqueta en el pipeline de leads
+                const tags_response = await kommo_api.get('/leads/tags');
+
+                const existing_tag = tags_response.data?._embedded?.tags?.find(
+                    tag => tag.name.toLowerCase() === categoria.toLowerCase()
+                );
+
+                if (existing_tag) {
+                    tag_id = existing_tag.id;
+                    console.log(`Kommo - Etiqueta existente encontrada: ${categoria} (ID: ${tag_id})`);
+                } else {
+                    // Crear la etiqueta si no existe
+                    const new_tag_response = await kommo_api.post('/leads/tags', [{ name: categoria }]);
+                    tag_id = new_tag_response.data._embedded.tags[0].id;
+                    console.log(`Kommo - Nueva etiqueta creada: ${categoria} (ID: ${tag_id})`);
+                }
+            } catch (tagError) {
+                console.error('Kommo - Error al gestionar etiqueta:', tagError.response?.data || tagError.message);
+                // Continuar sin etiqueta si hay error
+            }
+        }
+
+        // 3. Crear Lead
+        const lead_data = {
+            name: `${nombre_completo} - onboarding`,
+            pipeline_id: kommo_preston_pipeline_id,
+            status_id: kommo_preston_pipeline_etapa_id,
+            _embedded: {
+                contacts: [{
+                    id: contacto_id
+                }]
+            }
+        }
+
+        const lead_respuesta = await kommo_api.post('/leads', [lead_data])
+        const lead_id = lead_respuesta.data._embedded.leads[0].id
+        console.log('Kommo - Lead Preston:', lead_id)
+
+        // Agregar etiqueta al lead
+        if (tag_id) {
+            try {
+                const lead_tag_data = {
+                    _embedded: {
+                        tags: [{
+                            id: tag_id
+                        }]
+                    }
+                };
+                await kommo_api.patch(`/leads/${lead_id}`, lead_tag_data);
+                console.log(`Kommo - Etiqueta '${categoria}' agregada al Lead ${lead_id}`);
+            } catch (leadTagError) {
+                console.error('Kommo - Error al agregar etiqueta al lead:', leadTagError.response?.data || leadTagError.message);
+            }
+        }
+
+        // 4. Agregar etiqueta al contacto (si existe y no se agregó antes)
+        if (tag_id) {
+            try {
+                const contact_tag_data = {
+                    _embedded: {
+                        tags: [{
+                            id: tag_id
+                        }]
+                    }
+                };
+                await kommo_api.patch(`/contacts/${contacto_id}`, contact_tag_data);
+                console.log(`Kommo - Etiqueta '${categoria}' agregada al Contacto ${contacto_id}`);
+            } catch (contactTagError) {
+                console.error('Kommo - Error al agregar etiqueta al contacto:', contactTagError.response?.data || contactTagError.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            mensaje: 'Contacto y Lead creados con éxito en Kommo CRM (Preston)',
+            datos: {
+                contacto_id,
+                lead_id,
+                tag_id
+            }
+        })
+
+    } catch (error) {
+        console.error('Kommo - Error en Preston:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al procesar el formulario Preston',
+            detalles: error.response?.data || error.message
+        })
+    }
+})
+
+// Pazcel: Ruta para manejar la respuestas del formulario webconst nodemailer = require('nodemailer') 
 app.post('/api/pazcel', async (req, res) => {
     try {
         const { nombre, email, empresa, ciudad, conferencia, desafio } = req.body

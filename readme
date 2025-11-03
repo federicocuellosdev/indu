@@ -2,3 +2,4 @@ dev - 29/09/25 - Lanzamiento
 v1.0.0 - 06/10/25 - Puesta en producción la API en una instancia paga.
 v1.0.1 - 07/10/25 - Se agregó código para manejar la respuesta al formulario de contacto para Pazcel.
 v1.0.2 - 31/10/25 - Se agregó código para imprimir el envio de datos hacia el email de pazcel.
+v1.0.3 - 01/10/25 - Se incorporó código para generar un endpoint y derivar los datos a kommo de Preston.
