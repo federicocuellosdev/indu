@@ -16,7 +16,9 @@ app.use(cors({
             'https://pazcel.com.ar',
             'https://www.pazcel.com.ar',
             'https://breakmkt.com.ar',
-            'https://breakmkt.com.ar/preston/'
+            'https://breakmkt.com.ar/preston/',
+            'https://preston.com.ar',
+            'https://www.preston.com.ar'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
