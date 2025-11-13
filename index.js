@@ -18,7 +18,9 @@ app.use(cors({
             'https://breakmkt.com.ar',
             'https://breakmkt.com.ar/preston/',
             'https://preston.com.ar',
-            'https://www.preston.com.ar'
+            'https://www.preston.com.ar',
+            'https://coas.com.ar',
+            'https://www.coas.com.ar'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
@@ -417,6 +419,104 @@ app.post('/api/pazcel', async (req, res) => {
         })
     }
 })
+
+// Kommo: Ruta para COAS
+app.post('/coas', async (req, res) => {
+    // Credenciales y IDs para COAS
+    const KOMMO_COAS_SUBDOMINIO = process.env.KOMMO_COAS_SUBDOMINIO;
+    const KOMMO_COAS_TOKEN = process.env.KOMMO_COAS_TOKEN
+    const PIPELINE_ID = 10961771;
+    const STATUS_ID = 84103431;
+
+    try {
+        const { nombre_completo, telefono, onboarding_respuestas } = req.body;
+
+        if (!nombre_completo || !telefono) {
+            return res.status(400).json({
+                success: false,
+                mensaje: 'Faltan datos obligatorios: nombre_completo y telefono son requeridos.'
+            });
+        }
+
+        const kommo_api = axios.create({
+            baseURL: `https://${KOMMO_COAS_SUBDOMINIO}.kommo.com/api/v4`,
+            headers: {
+                'Authorization': `Bearer ${KOMMO_COAS_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        // 1. Crear el Contacto
+        const contacto_data = {
+            name: nombre_completo,
+            custom_fields_values: [
+                {
+                    field_code: 'PHONE',
+                    values: [{
+                        enum_code: 'WORK',
+                        value: telefono
+                    }]
+                }
+            ]
+        };
+
+        const contacto_respuesta = await kommo_api.post('/contacts', [contacto_data]);
+        const contacto_id = contacto_respuesta.data._embedded.contacts[0].id;
+        console.log(`Kommo COAS - Contacto creado: ${contacto_id}`);
+
+        // 2. Crear el Lead y vincularlo al contacto
+        const lead_data = {
+            name: `${nombre_completo} - onboarding`,
+            pipeline_id: PIPELINE_ID,
+            status_id: STATUS_ID,
+            _embedded: {
+                contacts: [{
+                    id: contacto_id
+                }]
+            }
+        };
+
+        const lead_respuesta = await kommo_api.post('/leads', [lead_data]);
+        const lead_id = lead_respuesta.data._embedded.leads[0].id;
+        console.log(`Kommo COAS - Lead creado: ${lead_id}`);
+
+        // 3. Formatear y agregar la nota con las respuestas del onboarding
+        if (onboarding_respuestas && Array.isArray(onboarding_respuestas) && onboarding_respuestas.length > 0) {
+            let nota_texto = 'Respuestas del Onboarding:\n\n';
+            onboarding_respuestas.forEach(item => {
+                nota_texto += `P: ${item.question}\nR: ${item.answer}\n\n`;
+            });
+
+            const nota_data = [{
+                entity_id: lead_id, // Cambiado a lead_id
+                note_type: 'common',
+                params: {
+                    text: nota_texto
+                }
+            }];
+
+            await kommo_api.post(`/leads/${lead_id}/notes`, nota_data); // Cambiado a /leads/${lead_id}/notes
+            console.log(`Kommo COAS - Nota agregada al lead ${lead_id}`);
+        }
+        
+        res.status(201).json({
+            success: true,
+            mensaje: 'Contacto y Lead creados exitosamente en Kommo para COAS.',
+            data: {
+                contact_id: contacto_id,
+                lead_id: lead_id
+            }
+        });
+
+    } catch (error) {
+        console.error('Kommo COAS - Error:', error.response?.data || error.message);
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al procesar la solicitud para COAS.',
+            detalles: error.response?.data || error.message
+        });
+    }
+});
 
 
 // Iniciar servidor
