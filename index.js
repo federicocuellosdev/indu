@@ -2,8 +2,23 @@ require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const axios = require('axios')
+const multer = require('multer')
 const app = express()
 const PORT = process.env.PORT || 3000
+
+// Multer configuration for file uploads
+const storage = multer.memoryStorage()
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+            cb(null, true)
+        } else {
+            cb(new Error('Solo se permiten archivos PDF'), false)
+        }
+    }
+})
 
 // Middleware
 app.use(cors({
@@ -20,7 +35,9 @@ app.use(cors({
             'https://preston.com.ar',
             'https://www.preston.com.ar',
             'https://coas.com.ar',
-            'https://www.coas.com.ar'
+            'https://www.coas.com.ar',
+            'https://talent.breakmkt.com.ar',
+            'https://www.talent.breakmkt.com.ar'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
@@ -519,7 +536,348 @@ app.post('/coas', async (req, res) => {
 });
 
 
+// =====================================================
+// BREAK TALENT: Endpoints para onboarding de talentos
+// =====================================================
+
+// Configuración de Kommo para Break Talent
+const KOMMO_TALENT_SUBDOMINIO = process.env.KOMMO_TALENT_SUBDOMINIO
+const KOMMO_TALENT_TOKEN = process.env.KOMMO_TALENT_TOKEN
+const TALENT_PIPELINE_ID = 12525819
+const TALENT_STATUS_ID = 96747831
+const TALENT_POSICION_FIELD_ID = 3861268
+
+// Crear instancia de axios para Kommo Talent
+function createTalentApi() {
+    return axios.create({
+        baseURL: `https://${KOMMO_TALENT_SUBDOMINIO}.kommo.com/api/v4`,
+        headers: {
+            'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`,
+            'Content-Type': 'application/json'
+        }
+    })
+}
+
+// TALENT STEP 1: Crear contacto y lead
+app.post('/talent/step1', async (req, res) => {
+    try {
+        const { nombre, telefono, email, linkedin } = req.body
+
+        if (!nombre || !telefono || !email) {
+            return res.status(400).json({
+                success: false,
+                message: 'Campos requeridos: nombre, telefono, email'
+            })
+        }
+
+        // Validar nombre completo (mínimo 2 palabras)
+        const nombreParts = nombre.trim().split(/\s+/)
+        if (nombreParts.length < 2) {
+            return res.status(400).json({
+                success: false,
+                message: 'Ingresa tu nombre completo (nombre y apellido)'
+            })
+        }
+
+        // Validar email
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        if (!emailRegex.test(email)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Formato de email inválido'
+            })
+        }
+
+        // Validar LinkedIn (requerido)
+        if (!linkedin || !linkedin.startsWith('https://www.linkedin.com/in/')) {
+            return res.status(400).json({
+                success: false,
+                message: 'La URL de LinkedIn es requerida y debe comenzar con https://www.linkedin.com/in/'
+            })
+        }
+
+        const kommo_api = createTalentApi()
+
+        // Crear el contacto con nombre completo y etiqueta "talento"
+        const contactPayload = [{
+            name: nombre,
+            custom_fields_values: [
+                {
+                    field_code: 'PHONE',
+                    values: [{ value: telefono, enum_code: 'WORK' }]
+                },
+                {
+                    field_code: 'EMAIL',
+                    values: [{ value: email, enum_code: 'WORK' }]
+                }
+            ],
+            _embedded: {
+                tags: [{ name: 'talento' }]
+            }
+        }]
+
+        const contactResponse = await kommo_api.post('/contacts', contactPayload)
+        const contactId = contactResponse.data._embedded.contacts[0].id
+        console.log('Talent - Contacto creado:', contactId)
+
+        // Crear el lead con título "nombre - onboarding" y etiqueta "talento"
+        const leadPayload = [{
+            name: `${nombre} - onboarding`,
+            pipeline_id: TALENT_PIPELINE_ID,
+            status_id: TALENT_STATUS_ID,
+            _embedded: {
+                contacts: [{ id: contactId }],
+                tags: [{ name: 'talento' }]
+            }
+        }]
+
+        const leadResponse = await kommo_api.post('/leads', leadPayload)
+        const leadId = leadResponse.data._embedded.leads[0].id
+        console.log('Talent - Lead creado:', leadId)
+
+        res.status(201).json({
+            success: true,
+            message: 'Contacto y lead creados exitosamente',
+            data: {
+                leadId,
+                contactId
+            }
+        })
+
+    } catch (error) {
+        console.error('Talent Step1 - Error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            message: 'Error al crear contacto y lead',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        })
+    }
+})
+
+// TALENT STEP 2: Actualizar con posición y motivación
+app.post('/talent/step2', async (req, res) => {
+    try {
+        const { leadId, contactId, posicion, motivacion } = req.body
+
+        if (!leadId || !posicion || !motivacion) {
+            return res.status(400).json({
+                success: false,
+                message: 'Campos requeridos: leadId, posicion, motivacion'
+            })
+        }
+
+        const kommo_api = createTalentApi()
+
+        // Actualizar el campo Posición en el lead
+        const leadPayload = {
+            custom_fields_values: [
+                {
+                    field_id: TALENT_POSICION_FIELD_ID,
+                    values: [{ value: posicion }]
+                }
+            ]
+        }
+
+        await kommo_api.patch(`/leads/${leadId}`, leadPayload)
+
+        // Agregar nota con la pregunta de motivación
+        const noteContent = [
+            '¿Qué es lo que más te motiva para esta posición?',
+            motivacion
+        ].join('\n')
+
+        const notePayload = [{
+            entity_id: leadId,
+            note_type: 'common',
+            params: {
+                text: noteContent
+            }
+        }]
+
+        await kommo_api.post('/leads/notes', notePayload)
+        console.log('Talent Step2 - Lead actualizado:', leadId)
+
+        res.status(200).json({
+            success: true,
+            message: 'Lead actualizado con posición y motivación'
+        })
+
+    } catch (error) {
+        console.error('Talent Step2 - Error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            message: 'Error al actualizar lead',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        })
+    }
+})
+
+// TALENT STEP 3: Agregar notas de pretensión salarial y trabajo por proyecto
+app.post('/talent/step3', async (req, res) => {
+    try {
+        const { leadId, pretension_salarial, trabajo_proyecto } = req.body
+
+        if (!leadId || !pretension_salarial || !trabajo_proyecto) {
+            return res.status(400).json({
+                success: false,
+                message: 'Campos requeridos: leadId, pretension_salarial, trabajo_proyecto'
+            })
+        }
+
+        const kommo_api = createTalentApi()
+
+        // Nota 1: Pretensión salarial
+        const notaSalarial = [
+            '¿Cuál es tu pretensión salarial?',
+            pretension_salarial
+        ].join('\n')
+
+        await kommo_api.post('/leads/notes', [{
+            entity_id: leadId,
+            note_type: 'common',
+            params: { text: notaSalarial }
+        }])
+
+        // Nota 2: Trabajo por proyecto/hora
+        const trabajoRespuesta = trabajo_proyecto === 'si' ? 'Sí' : 'No'
+        const notaTrabajo = [
+            '¿Estás dispuesto a trabajar por proyecto/hora?',
+            trabajoRespuesta
+        ].join('\n')
+
+        await kommo_api.post('/leads/notes', [{
+            entity_id: leadId,
+            note_type: 'common',
+            params: { text: notaTrabajo }
+        }])
+
+        console.log('Talent Step3 - Notas agregadas al lead:', leadId)
+
+        res.status(200).json({
+            success: true,
+            message: 'Lead actualizado con pretensión salarial'
+        })
+
+    } catch (error) {
+        console.error('Talent Step3 - Error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            message: 'Error al actualizar lead',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        })
+    }
+})
+
+// TALENT STEP 4: Subir CV
+app.post('/talent/step4', upload.single('cv'), async (req, res) => {
+    try {
+        const { leadId } = req.body
+        const file = req.file
+
+        if (!leadId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Campo requerido: leadId'
+            })
+        }
+
+        if (!file) {
+            return res.status(400).json({
+                success: false,
+                message: 'Campo requerido: cv (archivo PDF)'
+            })
+        }
+
+        // 0. Obtener la URL del drive
+        const accountResponse = await axios.get(
+            `https://${KOMMO_TALENT_SUBDOMINIO}.kommo.com/api/v4/account?with=drive_url`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`
+                }
+            }
+        )
+        const driveUrl = accountResponse.data.drive_url
+
+        // 1. Abrir sesión de carga en el drive
+        const sessionResponse = await axios.post(
+            `${driveUrl}/v1.0/sessions`,
+            {
+                file_name: file.originalname,
+                file_size: file.buffer.length
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        )
+
+        const { upload_url, max_part_size } = sessionResponse.data
+
+        // 2. Subir el archivo en partes si es necesario
+        let currentUrl = upload_url
+        let offset = 0
+        let fileData = null
+
+        while (offset < file.buffer.length) {
+            const partSize = Math.min(max_part_size, file.buffer.length - offset)
+            const part = file.buffer.slice(offset, offset + partSize)
+
+            const uploadResponse = await axios.post(currentUrl, part, {
+                headers: {
+                    'Content-Type': 'application/octet-stream'
+                }
+            })
+
+            if (uploadResponse.data.uuid) {
+                fileData = uploadResponse.data
+            } else if (uploadResponse.data.next_url) {
+                currentUrl = uploadResponse.data.next_url
+            }
+
+            offset += partSize
+        }
+
+        // 3. Adjuntar el archivo al lead
+        if (fileData) {
+            await axios.put(
+                `https://${KOMMO_TALENT_SUBDOMINIO}.kommo.com/api/v4/leads/${leadId}/files`,
+                [{ file_uuid: fileData.uuid }],
+                {
+                    headers: {
+                        'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            )
+        }
+
+        console.log('Talent Step4 - CV subido para lead:', leadId)
+
+        res.status(200).json({
+            success: true,
+            message: 'CV subido exitosamente'
+        })
+
+    } catch (error) {
+        console.error('Talent Step4 - Error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            message: 'Error al subir CV',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        })
+    }
+})
+
+
 // Iniciar servidor
 app.listen(PORT, () => {
-    console.log(`Servidor corriendo en perto: ${PORT}`)
+    console.log(`Servidor corriendo en puerto: ${PORT}`)
+    console.log('Endpoints Talent:')
+    console.log('  POST /talent/step1 - Crear contacto y lead')
+    console.log('  POST /talent/step2 - Posición y motivación')
+    console.log('  POST /talent/step3 - Pretensión salarial')
+    console.log('  POST /talent/step4 - Subir CV')
 })
