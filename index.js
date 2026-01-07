@@ -30,6 +30,8 @@ app.use(cors({
             'https://www.tannery.com.ar',
             'https://pazcel.com.ar',
             'https://www.pazcel.com.ar',
+            'https://pazcel.com',
+            'https://www.pazcel.com',
             'https://breakmkt.com.ar',
             'https://breakmkt.com.ar/preston/',
             'https://preston.com.ar',
@@ -388,7 +390,7 @@ app.post('/api/pazcel', async (req, res) => {
         // Contenido del email
         const mailOptions = {
             from: process.env.PAZCEL_SMTP_CORREO,
-            to: 'hola@pazcel.com.ar',
+            to: 'fedecuellos@gmail.com',
             subject: 'Contacto Web',
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
