@@ -3,6 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const axios = require('axios')
 const multer = require('multer')
+const nodemailer = require('nodemailer')
 const app = express()
 const PORT = process.env.PORT || 3000
 
@@ -24,6 +25,10 @@ const upload = multer({
 app.use(cors({
     origin: function (origin, callback) {
         const dominios_permitidos = [
+            'http://localhost:5173',
+            'http://localhost:3000',
+            'http://127.0.0.1:5173',
+            'http://127.0.0.1:3000',
             'https://huapi.com.ar',
             'https://www.huapi.com.ar',
             'https://tannery.com.ar',
@@ -361,7 +366,7 @@ app.post('/preston', async (req, res) => {
     }
 })
 
-// Pazcel: Ruta para manejar la respuestas del formulario webconst nodemailer = require('nodemailer') 
+// Pazcel: Ruta para manejar la respuestas del formulario web
 app.post('/api/pazcel', async (req, res) => {
     try {
         const { nombre, email, empresa, ciudad, conferencia, desafio } = req.body
@@ -390,7 +395,7 @@ app.post('/api/pazcel', async (req, res) => {
         // Contenido del email
         const mailOptions = {
             from: process.env.PAZCEL_SMTP_CORREO,
-            to: 'fedecuellos@gmail.com',
+            to: 'hola@pazcel.com.ar',
             subject: 'Contacto Web',
             html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
