@@ -5,3 +5,4 @@ v1.0.2 - 31/10/25 - Se agregó código para imprimir el envio de datos hacia el 
 v1.0.3 - 01/10/25 - Se incorporó código para generar un endpoint y derivar los datos a kommo de Preston.
 v1.0.4 - 12/11/25 - Se incorporó codigo para generar un endpoint y derivar los datos a kommo de Coas.
 v1.0.5 - 27/12/25 - Se agregó el endpoint para enviar los datos del onboarding de Break Talent a Kommo.
+v1.0.6 - 09/01/26 - Se agregó el endpoint de budabot.

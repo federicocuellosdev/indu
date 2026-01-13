@@ -25,10 +25,8 @@ const upload = multer({
 app.use(cors({
     origin: function (origin, callback) {
         const dominios_permitidos = [
-            'http://localhost:5173',
-            'http://localhost:3000',
-            'http://127.0.0.1:5173',
-            'http://127.0.0.1:3000',
+            'https://budabot.com.ar',
+            'https://www.budabot.com.ar',
             'https://huapi.com.ar',
             'https://www.huapi.com.ar',
             'https://tannery.com.ar',
@@ -544,6 +542,143 @@ app.post('/coas', async (req, res) => {
 
 
 // =====================================================
+// BUDABOT: Endpoint para onboarding de negocios
+// =====================================================
+
+// Configuración de Kommo para Budabot (usa misma cuenta que Break Talent)
+const KOMMO_BUDABOT_SUBDOMINIO = process.env.KOMMO_TALENT_SUBDOMINIO
+const KOMMO_BUDABOT_TOKEN = process.env.KOMMO_TALENT_TOKEN
+// NOTA: Usa el pipeline "Embudo de ventas" existente, etapa "Incoming leads"
+// El plan de Kommo no permite crear ni modificar pipelines (error 402)
+const BUDABOT_PIPELINE_ID = 12288287 // Pipeline "Embudo de ventas"
+const BUDABOT_STATUS_ID = 94974739 // Etapa "Incoming leads"
+
+// Endpoint para recibir datos del onboarding de Budabot
+app.post('/budabot', async (req, res) => {
+    try {
+        const { nombre_completo, email, telefono, posicion, sitio_web, onboarding_respuestas } = req.body;
+
+        // Validación de campos obligatorios
+        if (!nombre_completo || !email || !telefono || !posicion) {
+            return res.status(400).json({
+                success: false,
+                mensaje: 'Faltan datos obligatorios: nombre_completo, email, telefono y posicion son requeridos.'
+            });
+        }
+
+        // Verificar que los IDs de pipeline estén configurados
+        if (!BUDABOT_PIPELINE_ID || !BUDABOT_STATUS_ID) {
+            return res.status(500).json({
+                success: false,
+                mensaje: 'El pipeline de Budabot no está configurado. Por favor, crea el pipeline y actualiza los IDs en el código.'
+            });
+        }
+
+        const kommo_api = axios.create({
+            baseURL: `https://${KOMMO_BUDABOT_SUBDOMINIO}.kommo.com/api/v4`,
+            headers: {
+                'Authorization': `Bearer ${KOMMO_BUDABOT_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        // 1. Crear el Contacto con email y teléfono
+        const custom_fields = [
+            {
+                field_code: 'PHONE',
+                values: [{
+                    enum_code: 'WORK',
+                    value: telefono
+                }]
+            },
+            {
+                field_code: 'EMAIL',
+                values: [{
+                    enum_code: 'WORK',
+                    value: email
+                }]
+            }
+        ];
+
+        const contacto_data = {
+            name: nombre_completo,
+            custom_fields_values: custom_fields
+        };
+
+        const contacto_respuesta = await kommo_api.post('/contacts', [contacto_data]);
+        const contacto_id = contacto_respuesta.data._embedded.contacts[0].id;
+        console.log(`Kommo Budabot - Contacto creado: ${contacto_id}`);
+
+        // 2. Crear la Oportunidad (Lead) vinculada al contacto
+        const lead_data = {
+            name: `${nombre_completo} - Budabot Onboarding`,
+            pipeline_id: BUDABOT_PIPELINE_ID,
+            status_id: BUDABOT_STATUS_ID,
+            _embedded: {
+                contacts: [{
+                    id: contacto_id
+                }],
+                tags: [{ name: 'budabot' }]
+            }
+        };
+
+        const lead_respuesta = await kommo_api.post('/leads', [lead_data]);
+        const lead_id = lead_respuesta.data._embedded.leads[0].id;
+        console.log(`Kommo Budabot - Oportunidad creada: ${lead_id}`);
+
+        // 3. Crear una única nota con toda la información del onboarding
+        let nota_texto = '📋 DATOS DEL ONBOARDING BUDABOT\n\n';
+        nota_texto += '👤 DATOS DE CONTACTO:\n';
+        nota_texto += `• Nombre: ${nombre_completo}\n`;
+        nota_texto += `• Email: ${email}\n`;
+        nota_texto += `• Teléfono: ${telefono}\n`;
+        nota_texto += `• Posición: ${posicion}\n`;
+        if (sitio_web) {
+            nota_texto += `• Sitio Web: ${sitio_web}\n`;
+        }
+        nota_texto += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+        // Agregar las preguntas y respuestas del onboarding
+        if (onboarding_respuestas && Array.isArray(onboarding_respuestas) && onboarding_respuestas.length > 0) {
+            nota_texto += '💬 RESPUESTAS DEL ONBOARDING:\n\n';
+            onboarding_respuestas.forEach((item, index) => {
+                nota_texto += `${index + 1}. ${item.question}\n`;
+                nota_texto += `   ➜ ${item.answer}\n\n`;
+            });
+        }
+
+        const nota_data = [{
+            entity_id: lead_id,
+            note_type: 'common',
+            params: {
+                text: nota_texto
+            }
+        }];
+
+        await kommo_api.post(`/leads/${lead_id}/notes`, nota_data);
+        console.log(`Kommo Budabot - Nota completa agregada al lead ${lead_id}`);
+
+        res.status(201).json({
+            success: true,
+            mensaje: 'Contacto y Oportunidad creados exitosamente en Kommo para Budabot.',
+            data: {
+                contact_id: contacto_id,
+                lead_id: lead_id
+            }
+        });
+
+    } catch (error) {
+        console.error('Kommo Budabot - Error:', error.response?.data || error.message);
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al procesar la solicitud para Budabot.',
+            detalles: error.response?.data || error.message
+        });
+    }
+});
+
+
+// =====================================================
 // BREAK TALENT: Endpoints para onboarding de talentos
 // =====================================================
 
@@ -882,7 +1017,9 @@ app.post('/talent/step4', upload.single('cv'), async (req, res) => {
 // Iniciar servidor
 app.listen(PORT, () => {
     console.log(`Servidor corriendo en puerto: ${PORT}`)
-    console.log('Endpoints Talent:')
+    console.log('\nEndpoints Budabot:')
+    console.log('  POST /budabot - Crear contacto y lead con respuestas del onboarding')
+    console.log('\nEndpoints Talent:')
     console.log('  POST /talent/step1 - Crear contacto y lead')
     console.log('  POST /talent/step2 - Posición y motivación')
     console.log('  POST /talent/step3 - Pretensión salarial')
