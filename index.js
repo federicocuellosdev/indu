@@ -205,8 +205,8 @@ app.post('/api/kommo-contacto', async (req, res) => {
 app.post('/preston', async (req, res) => {
     const kommo_preston_subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
     const kommo_preston_token = process.env.KOMMO_PRESTON_TOKEN
-    const kommo_preston_pipeline_id = 12339992
-    const kommo_preston_pipeline_etapa_id = 95362684
+    const kommo_preston_pipeline_id = 8704063        // Pipeline "Embudo de ventas"
+    const kommo_preston_pipeline_etapa_id = 68359371  // Etapa "Ingreso Onboarding"
 
     try {
         const { nombre_completo, email, telefono, categoria, dni } = req.body

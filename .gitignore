@@ -1,3 +1,5 @@
 .env
+.claude
+test
 node_modules
 front
