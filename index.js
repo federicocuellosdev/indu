@@ -1055,9 +1055,8 @@ app.get('/callback', async (req, res) => {
                     <h1>Tienda conectada correctamente</h1>
                     <p>Tu tienda (ID: ${user_id}) fue vinculada. Los pedidos se sincronizarán automáticamente cada 4 horas.</p>
                     <div class="env-vars">
-                        <strong>Agregar en Render Environment Variables:</strong>
-                        TIENDANUBE_USER_ID=${user_id}<br>
-                        TIENDANUBE_ACCESS_TOKEN=${access_token}
+                        <strong>Agregar esta tienda a TIENDANUBE_STORES en Render:</strong>
+                        {"user_id":"${user_id}","access_token":"${access_token}"}
                     </div>
                 </div>
             </body>

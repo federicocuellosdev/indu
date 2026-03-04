@@ -47,19 +47,22 @@ async function getOrders(storeId, accessToken, sinceDate) {
     return response.data
 }
 
-// Leer tiendas guardadas (env vars tienen prioridad sobre archivo)
+// Leer tiendas guardadas (env var tiene prioridad sobre archivo)
+// Formato env: TIENDANUBE_STORES=[{"user_id":"123","access_token":"abc"},{"user_id":"456","access_token":"def"}]
 function getStores() {
-    const stores = []
-
-    // Fuente principal: variables de entorno (persiste en Render)
-    if (process.env.TIENDANUBE_USER_ID && process.env.TIENDANUBE_ACCESS_TOKEN) {
-        stores.push({
-            user_id: process.env.TIENDANUBE_USER_ID,
-            access_token: process.env.TIENDANUBE_ACCESS_TOKEN,
-            connected_at: null,
-            last_sync: null
-        })
-        return stores
+    // Fuente principal: variable de entorno JSON (persiste en Render)
+    if (process.env.TIENDANUBE_STORES) {
+        try {
+            const parsed = JSON.parse(process.env.TIENDANUBE_STORES)
+            return parsed.map(s => ({
+                user_id: String(s.user_id),
+                access_token: s.access_token,
+                connected_at: null,
+                last_sync: null
+            }))
+        } catch (e) {
+            console.error('Error parseando TIENDANUBE_STORES:', e.message)
+        }
     }
 
     // Fallback: archivo local (desarrollo)
