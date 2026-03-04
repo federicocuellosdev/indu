@@ -4,6 +4,8 @@ const cors = require('cors')
 const axios = require('axios')
 const multer = require('multer')
 const nodemailer = require('nodemailer')
+const { exchangeCodeForToken, saveStore } = require('./tiendanube/api')
+const { syncAllStores, startCron } = require('./tiendanube/cron')
 const app = express()
 const PORT = process.env.PORT || 3000
 
@@ -1014,9 +1016,78 @@ app.post('/talent/step4', upload.single('cv'), async (req, res) => {
 })
 
 
+// =====================================================
+// TIENDA NUBE: OAuth callback y sincronización
+// =====================================================
+
+// Callback OAuth de Tienda Nube
+app.get('/callback', async (req, res) => {
+    const { code } = req.query
+
+    if (!code) {
+        return res.status(400).send('Falta el parámetro "code"')
+    }
+
+    try {
+        const { user_id, access_token } = await exchangeCodeForToken(code)
+
+        saveStore(user_id, access_token)
+        console.log(`Tienda Nube - Tienda ${user_id} conectada`)
+
+        res.send(`
+            <!DOCTYPE html>
+            <html lang="es">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Tienda Conectada</title>
+                <style>
+                    body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
+                    .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
+                    h1 { color: #2ecc71; font-size: 24px; }
+                    p { color: #666; }
+                    .env-vars { background: #f0f0f0; padding: 15px; border-radius: 8px; text-align: left; font-family: monospace; font-size: 13px; word-break: break-all; margin-top: 20px; }
+                    .env-vars strong { display: block; margin-bottom: 5px; color: #333; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>Tienda conectada correctamente</h1>
+                    <p>Tu tienda (ID: ${user_id}) fue vinculada. Los pedidos se sincronizarán automáticamente cada 4 horas.</p>
+                    <div class="env-vars">
+                        <strong>Agregar en Render Environment Variables:</strong>
+                        TIENDANUBE_USER_ID=${user_id}<br>
+                        TIENDANUBE_ACCESS_TOKEN=${access_token}
+                    </div>
+                </div>
+            </body>
+            </html>
+        `)
+    } catch (error) {
+        console.error('Tienda Nube - Error OAuth:', error.response?.data || error.message)
+        res.status(500).send('Error al conectar la tienda. Intentá nuevamente.')
+    }
+})
+
+// Forzar sincronización manual
+app.get('/sync', async (req, res) => {
+    try {
+        await syncAllStores()
+        res.json({ success: true, mensaje: 'Sincronización completada' })
+    } catch (error) {
+        console.error('Sync manual - Error:', error.message)
+        res.status(500).json({ success: false, mensaje: 'Error en sincronización', detalles: error.message })
+    }
+})
+
+
 // Iniciar servidor
 app.listen(PORT, () => {
+    startCron()
     console.log(`Servidor corriendo en puerto: ${PORT}`)
+    console.log('\nEndpoints Tienda Nube:')
+    console.log('  GET  /callback - OAuth callback de Tienda Nube')
+    console.log('  GET  /sync     - Forzar sincronización manual')
     console.log('\nEndpoints Budabot:')
     console.log('  POST /budabot - Crear contacto y lead con respuestas del onboarding')
     console.log('\nEndpoints Talent:')

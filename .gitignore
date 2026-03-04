@@ -3,3 +3,5 @@
 test
 node_modules
 front
+data/stores.json
+credentials/
