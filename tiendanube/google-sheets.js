@@ -55,7 +55,7 @@ async function writeOrders(orders, storeId) {
             order.customer ? `${order.customer.name}` : '',
             order.customer ? order.customer.email : '',
             order.customer ? order.customer.phone : '',
-            order.total,
+            order.total ? parseFloat(order.total) : 0,
             order.currency,
             productos,
             order.payment_status,
