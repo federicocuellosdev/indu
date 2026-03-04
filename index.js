@@ -1069,9 +1069,11 @@ app.get('/callback', async (req, res) => {
 })
 
 // Forzar sincronización manual
+// Uso: /sync (todos los pedidos) o /sync?since=2024-01-01 (desde una fecha)
 app.get('/sync', async (req, res) => {
     try {
-        await syncAllStores()
+        const since = req.query.since || null
+        await syncAllStores(since)
         res.json({ success: true, mensaje: 'Sincronización completada' })
     } catch (error) {
         console.error('Sync manual - Error:', error.message)

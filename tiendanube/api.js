@@ -22,29 +22,42 @@ async function exchangeCodeForToken(code) {
     }
 }
 
-// Obtener pedidos de una tienda
+// Obtener pedidos de una tienda (con paginación automática)
 async function getOrders(storeId, accessToken, sinceDate) {
-    const params = {
-        per_page: 200
+    const allOrders = []
+    let page = 1
+
+    const headers = {
+        'Authentication': `bearer ${accessToken}`,
+        'User-Agent': 'Indu API (hola@breakmkt.com.ar)',
+        'Content-Type': 'application/json'
     }
 
-    if (sinceDate) {
-        params.created_at_min = sinceDate
-    }
+    while (true) {
+        const params = { per_page: 200, page }
 
-    const response = await axios.get(
-        `https://api.tiendanube.com/v1/${storeId}/orders`,
-        {
-            params,
-            headers: {
-                'Authentication': `bearer ${accessToken}`,
-                'User-Agent': 'Indu API (hola@breakmkt.com.ar)',
-                'Content-Type': 'application/json'
-            }
+        if (sinceDate) {
+            params.created_at_min = sinceDate
         }
-    )
 
-    return response.data
+        const response = await axios.get(
+            `https://api.tiendanube.com/v1/${storeId}/orders`,
+            { params, headers }
+        )
+
+        const orders = response.data
+
+        if (!orders || orders.length === 0) break
+
+        allOrders.push(...orders)
+        console.log(`  Página ${page}: ${orders.length} pedidos (total acumulado: ${allOrders.length})`)
+
+        if (orders.length < 200) break
+
+        page++
+    }
+
+    return allOrders
 }
 
 // Leer tiendas guardadas (env var tiene prioridad sobre archivo)
@@ -57,6 +70,7 @@ function getStores() {
             return parsed.map(s => ({
                 user_id: String(s.user_id),
                 access_token: s.access_token,
+                name: s.name || `Tienda_${s.user_id}`,
                 connected_at: null,
                 last_sync: null
             }))

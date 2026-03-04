@@ -3,7 +3,8 @@ const { getStores, getOrders, updateLastSync } = require('./api')
 const { writeOrders } = require('./google-sheets')
 
 // Sincronizar pedidos de todas las tiendas
-async function syncAllStores() {
+// sinceParam: fecha opcional (ej: "2024-01-01"). Si es null, trae todos los pedidos.
+async function syncAllStores(sinceParam) {
     const stores = getStores()
 
     if (stores.length === 0) {
@@ -15,15 +16,18 @@ async function syncAllStores() {
 
     for (const store of stores) {
         try {
-            // Usar last_sync o últimas 4 horas como fallback
-            const sinceDate = store.last_sync || new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString()
+            // Prioridad: parámetro manual > last_sync > null (todos los pedidos)
+            const sinceDate = sinceParam || store.last_sync || null
 
-            console.log(`Sync - Tienda ${store.user_id}: obteniendo pedidos desde ${sinceDate}`)
+            if (sinceDate) {
+                console.log(`Sync - Tienda ${store.user_id}: obteniendo pedidos desde ${sinceDate}`)
+            } else {
+                console.log(`Sync - Tienda ${store.user_id}: obteniendo TODOS los pedidos`)
+            }
 
             const orders = await getOrders(store.user_id, store.access_token, sinceDate)
-            const count = await writeOrders(orders, store.user_id)
+            const count = await writeOrders(orders, store.name)
 
-            updateLastSync(store.user_id)
             console.log(`Sync - Tienda ${store.user_id}: ${count} pedidos sincronizados`)
 
         } catch (error) {
@@ -38,7 +42,7 @@ async function syncAllStores() {
 function startCron() {
     cron.schedule('0 */4 * * *', () => {
         console.log(`Cron - Ejecutando sincronización: ${new Date().toISOString()}`)
-        syncAllStores()
+        syncAllStores(null)
     })
 
     console.log('Cron - Job programado: cada 4 horas (minuto 0)')
