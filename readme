@@ -8,3 +8,4 @@ v1.0.5 - 27/12/25 - Se agregó el endpoint para enviar los datos del onboarding 
 v1.0.6 - 09/01/26 - Se agregó el endpoint de budabot.
 v1.0.7 - 27/01/26 - Se modificó el id de pipeline y etapa para centralizar todo en un embudo dentro de Kommo.
 v1.0.8 - 04/03/26 - Se agregó un nuevo proyecto para generar la integracion entre Tienda Nube (Huapi & Tannery) y Google Sheet.
+v1.0.9 - 14/04/26 - Se incorporó first_name al crear el contacto en Kommo para el endpoint de Preston.

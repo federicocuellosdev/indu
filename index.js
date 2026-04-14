@@ -234,8 +234,11 @@ app.post('/preston', async (req, res) => {
         })
 
         // 1. Crear Contacto
+        const primer_nombre = nombre_completo.trim().split(/\s+/)[0]
+
         const contacto_data = {
             name: nombre_completo,
+            first_name: primer_nombre,
             custom_fields_values: [
                 {
                     field_code: 'PHONE',
