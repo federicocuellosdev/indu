@@ -208,7 +208,11 @@ app.post('/preston', async (req, res) => {
     const kommo_preston_subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
     const kommo_preston_token = process.env.KOMMO_PRESTON_TOKEN
     const kommo_preston_pipeline_id = 8704063        // Pipeline "Embudo de ventas"
-    const kommo_preston_pipeline_etapa_id = 68359371  // Etapa "Ingreso Onboarding"
+
+    const CATEGORIAS_PREGUNTAR = ['JUBILADO-ANSES', 'PUBLICO-CHUBUT', 'MUNIC-SF', 'FFSS-ACTIVO', 'FFSS-RETIRADO', 'UNR']
+    const kommo_preston_pipeline_etapa_id = CATEGORIAS_PREGUNTAR.includes(req.body.categoria)
+        ? 104498980  // Etapa "PREGUNTAR"
+        : 68359371   // Etapa "INGRESO"
 
     try {
         const { nombre_completo, email, telefono, categoria, dni } = req.body
