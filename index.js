@@ -215,10 +215,12 @@ app.post('/preston', async (req, res) => {
         : 68359371   // Etapa "INGRESO"
 
     try {
-        const { nombre, apellido, email, telefono, categoria, dni } = req.body
-        const nombre_completo = [nombre, apellido].filter(Boolean).join(' ')
+        const { nombre, apellido, nombre_completo: nc, email, telefono, categoria, dni } = req.body
+        const nombre_completo = nombre && apellido ? `${nombre} ${apellido}` : (nc || '')
+        const first_name = nombre || nombre_completo.trim().split(/\s+/)[0] || ''
+        const last_name = apellido || nombre_completo.trim().split(/\s+/).slice(1).join(' ') || ''
 
-        if (!nombre || !apellido || !telefono || !categoria) {
+        if (!nombre_completo || !telefono || !categoria) {
             return res.status(400).json({
                 success: false,
                 mensaje: 'Faltan datos obligatorios: nombre, apellido, telefono, categoria'
@@ -241,8 +243,8 @@ app.post('/preston', async (req, res) => {
         // 1. Crear Contacto
         const contacto_data = {
             name: nombre_completo,
-            first_name: nombre,
-            last_name: apellido,
+            first_name: first_name,
+            last_name: last_name,
             custom_fields_values: [
                 {
                     field_code: 'PHONE',
