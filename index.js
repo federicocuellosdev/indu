@@ -229,6 +229,16 @@ app.post('/preston', async (req, res) => {
             dni_normalizado = dni.replace(/[^0-9]/g, '');
         }
 
+        // Normalizar teléfono a formato internacional Argentina (549XXXXXXXXXX)
+        let telefono_normalizado = telefono.replace(/[^0-9]/g, '')
+        if (!telefono_normalizado.startsWith('549')) {
+            if (telefono_normalizado.startsWith('0')) {
+                telefono_normalizado = '54' + telefono_normalizado.slice(1)
+            } else if (!telefono_normalizado.startsWith('54')) {
+                telefono_normalizado = '549' + telefono_normalizado
+            }
+        }
+
         const kommo_api = axios.create({
             baseURL: `https://${kommo_preston_subdominio}.kommo.com/api/v4`,
             headers: {
@@ -247,7 +257,7 @@ app.post('/preston', async (req, res) => {
                     field_code: 'PHONE',
                     values: [{
                         enum_code: 'WORK',
-                        value: telefono
+                        value: telefono_normalizado
                     }]
                 },
                 {
