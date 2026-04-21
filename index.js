@@ -252,6 +252,10 @@ app.post('/preston', async (req, res) => {
                         enum_code: 'WORK',
                         value: telefono
                     }]
+                },
+                {
+                    field_id: 1986017,
+                    values: [{ value: first_name }]
                 }
             ]
         }
