@@ -315,9 +315,8 @@ app.post('/preston', async (req, res) => {
             pipeline_id: kommo_preston_pipeline_id,
             status_id: kommo_preston_pipeline_etapa_id,
             _embedded: {
-                contacts: [{
-                    id: contacto_id
-                }]
+                contacts: [{ id: contacto_id }],
+                tags: tag_id ? [{ id: tag_id }] : (categoria ? [{ name: categoria }] : [])
             }
         }
 
