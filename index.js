@@ -250,6 +250,47 @@ app.post('/preston', async (req, res) => {
             }
         })
 
+        // 0. Buscar contacto existente por teléfono o DNI
+        async function buscarContacto(query) {
+            try {
+                const resp = await kommo_api.get(`/contacts?query=${encodeURIComponent(query)}&limit=10`)
+                return resp.data?._embedded?.contacts || []
+            } catch (e) {
+                if (e.response?.status === 204) return []
+                throw e
+            }
+        }
+
+        const candidatos = []
+        const porTelefono = await buscarContacto(telefono_normalizado)
+        candidatos.push(...porTelefono)
+        if (dni_normalizado) {
+            const porDni = await buscarContacto(dni_normalizado)
+            candidatos.push(...porDni)
+        }
+
+        const duplicado = candidatos.find(c => {
+            const fields = c.custom_fields_values || []
+            const telMatch = fields.some(f => f.field_code === 'PHONE' && f.values.some(v => {
+                const num = (v.value || '').replace(/[^0-9]/g, '')
+                return num && (num === telefono_normalizado || num.endsWith(telefono_normalizado.slice(-10)))
+            }))
+            const dniMatch = dni_normalizado && fields.some(f => f.field_id === 1986662 && f.values.some(v =>
+                String(v.value || '').replace(/[^0-9]/g, '') === dni_normalizado
+            ))
+            return telMatch || dniMatch
+        })
+
+        if (duplicado) {
+            console.log(`Kommo - Duplicado detectado, contacto existente: ${duplicado.id}`)
+            return res.status(200).json({
+                success: false,
+                duplicado: true,
+                mensaje: 'Ya existe un contacto con ese teléfono o DNI',
+                contacto_id: duplicado.id
+            })
+        }
+
         // 1. Crear Contacto
         const contacto_data = {
             name: nombre_completo,
