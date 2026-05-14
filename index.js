@@ -209,10 +209,7 @@ app.post('/preston', async (req, res) => {
     const kommo_preston_token = process.env.KOMMO_PRESTON_TOKEN
     const kommo_preston_pipeline_id = 8704063        // Pipeline "Embudo de ventas"
 
-    const CATEGORIAS_PREGUNTAR = ['JUBILADO-ANSES', 'PUBLICO-CHUBUT', 'MUNIC-SF', 'FFSS-ACTIVO', 'FFSS-RETIRADO', 'UNR']
-    const kommo_preston_pipeline_etapa_id = CATEGORIAS_PREGUNTAR.includes(req.body.categoria)
-        ? 104498980  // Etapa "PREGUNTAR"
-        : 68359371   // Etapa "INGRESO"
+    const kommo_preston_pipeline_etapa_id = 68359371  // Etapa "INGRESO"
 
     try {
         const { nombre, apellido, nombre_completo: nc, email, telefono, categoria, dni } = req.body
@@ -249,6 +246,45 @@ app.post('/preston', async (req, res) => {
                 'Content-Type': 'application/json'
             }
         })
+
+        // 0. Buscar contacto existente por teléfono o DNI
+        async function buscarContacto(query) {
+            try {
+                const resp = await kommo_api.get(`/contacts?query=${encodeURIComponent(query)}&limit=10`)
+                return resp.data?._embedded?.contacts || []
+            } catch (e) {
+                if (e.response?.status === 204) return []
+                throw e
+            }
+        }
+
+        const candidatos = []
+        const porTelefono = await buscarContacto(telefono_normalizado)
+        candidatos.push(...porTelefono)
+        if (dni_normalizado) {
+            const porDni = await buscarContacto(dni_normalizado)
+            candidatos.push(...porDni)
+        }
+
+        const duplicado = candidatos.find(c => {
+            const fields = c.custom_fields_values || []
+            const telMatch = fields.some(f => f.field_code === 'PHONE' && f.values.some(v => {
+                const num = (v.value || '').replace(/[^0-9]/g, '')
+                return num && (num === telefono_normalizado || num.endsWith(telefono_normalizado.slice(-10)))
+            }))
+            const dniMatch = dni_normalizado && fields.some(f => f.field_id === 1986662 && f.values.some(v =>
+                String(v.value || '').replace(/[^0-9]/g, '') === dni_normalizado
+            ))
+            return telMatch || dniMatch
+        })
+
+        if (duplicado) {
+            console.log(`Kommo - Duplicado detectado, contacto existente: ${duplicado.id}. Skip silencioso.`)
+            return res.json({
+                success: true,
+                mensaje: 'Solicitud procesada correctamente'
+            })
+        }
 
         // 1. Crear Contacto
         const contacto_data = {
