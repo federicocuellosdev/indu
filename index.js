@@ -282,12 +282,10 @@ app.post('/preston', async (req, res) => {
         })
 
         if (duplicado) {
-            console.log(`Kommo - Duplicado detectado, contacto existente: ${duplicado.id}`)
-            return res.status(200).json({
-                success: false,
-                duplicado: true,
-                mensaje: 'Ya existe un contacto con ese teléfono o DNI',
-                contacto_id: duplicado.id
+            console.log(`Kommo - Duplicado detectado, contacto existente: ${duplicado.id}. Skip silencioso.`)
+            return res.json({
+                success: true,
+                mensaje: 'Solicitud procesada correctamente'
             })
         }
 
