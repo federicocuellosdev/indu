@@ -424,6 +424,285 @@ app.post('/preston', async (req, res) => {
     }
 })
 
+// ==================================================================
+// PRESTON — Onboarding v2
+// ==================================================================
+// Multer específico para v2: acepta PDF, JPG, PNG (hasta 10MB/archivo)
+const uploadPrestonV2 = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        const ok = ['application/pdf', 'image/jpeg', 'image/png'].includes(file.mimetype)
+        cb(ok ? null : new Error('Solo PDF, JPG o PNG'), ok)
+    }
+})
+
+// POST /preston-v2 → Paso 2: crea contacto + lead con tags y devuelve { lead_id }
+app.post('/preston-v2', async (req, res) => {
+    const subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
+    const token = process.env.KOMMO_PRESTON_TOKEN
+    const pipeline_id = 8704063        // Embudo de ventas
+    const etapa_id = 68359371          // INGRESO
+
+    try {
+        const {
+            categoria, sub_categoria, motivo_yafue,
+            situacion_laboral, jurisdiccion,
+            nombre, apellido, telefono, dni, email
+        } = req.body
+
+        if (!nombre || !apellido || !telefono || !dni || !categoria) {
+            return res.status(400).json({
+                success: false,
+                mensaje: 'Faltan datos obligatorios: nombre, apellido, telefono, dni, categoria'
+            })
+        }
+
+        const nombre_completo = `${nombre} ${apellido}`.trim()
+        const dni_normalizado = String(dni).replace(/[^0-9]/g, '')
+        let telefono_normalizado = String(telefono).replace(/[^0-9]/g, '')
+        if (!telefono_normalizado.startsWith('549')) {
+            if (telefono_normalizado.startsWith('0')) {
+                telefono_normalizado = '54' + telefono_normalizado.slice(1)
+            } else if (!telefono_normalizado.startsWith('54')) {
+                telefono_normalizado = '549' + telefono_normalizado
+            }
+        }
+
+        const kommo_api = axios.create({
+            baseURL: `https://${subdominio}.kommo.com/api/v4`,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        })
+
+        // 0. Detectar contacto duplicado por teléfono o DNI (para reutilizar)
+        async function buscarContacto(query) {
+            try {
+                const r = await kommo_api.get(`/contacts?query=${encodeURIComponent(query)}&limit=10`)
+                return r.data?._embedded?.contacts || []
+            } catch (e) {
+                if (e.response?.status === 204) return []
+                throw e
+            }
+        }
+        const candidatos = [
+            ...(await buscarContacto(telefono_normalizado)),
+            ...(dni_normalizado ? await buscarContacto(dni_normalizado) : [])
+        ]
+        const duplicado = candidatos.find(c => {
+            const fields = c.custom_fields_values || []
+            const telMatch = fields.some(f => f.field_code === 'PHONE' && f.values.some(v => {
+                const num = (v.value || '').replace(/[^0-9]/g, '')
+                return num && (num === telefono_normalizado || num.endsWith(telefono_normalizado.slice(-10)))
+            }))
+            const dniMatch = dni_normalizado && fields.some(f => f.field_id === 1986662 && f.values.some(v =>
+                String(v.value || '').replace(/[^0-9]/g, '') === dni_normalizado
+            ))
+            return telMatch || dniMatch
+        })
+
+        // 1. Crear o reutilizar contacto
+        let contacto_id
+        if (duplicado) {
+            contacto_id = duplicado.id
+            console.log(`Preston v2 - Contacto duplicado, reutilizando: ${contacto_id}`)
+        } else {
+            const contacto_data = {
+                name: nombre_completo,
+                first_name: nombre,
+                last_name: apellido,
+                custom_fields_values: [
+                    { field_code: 'PHONE', values: [{ enum_code: 'WORK', value: telefono_normalizado }] },
+                    { field_id: 1986017, values: [{ value: nombre }] },
+                    { field_id: 1986662, values: [{ value: dni_normalizado }] }
+                ]
+            }
+            if (email) {
+                contacto_data.custom_fields_values.push({
+                    field_code: 'EMAIL', values: [{ enum_code: 'WORK', value: email }]
+                })
+            }
+            const cr = await kommo_api.post('/contacts', [contacto_data])
+            contacto_id = cr.data._embedded.contacts[0].id
+            console.log('Preston v2 - Contacto creado:', contacto_id)
+        }
+
+        // 2. Gestionar tags: categoría + sub_categoría (si aplica)
+        async function getOrCreateTag(name) {
+            if (!name || !String(name).trim()) return null
+            try {
+                const r = await kommo_api.get('/leads/tags')
+                const existing = r.data?._embedded?.tags?.find(t => t.name.toLowerCase() === String(name).toLowerCase())
+                if (existing) return existing.id
+                const nr = await kommo_api.post('/leads/tags', [{ name }])
+                return nr.data._embedded.tags[0].id
+            } catch (e) {
+                console.error('Preston v2 - Error tag', name, e.response?.data || e.message)
+                return null
+            }
+        }
+        const tag_cat_id = await getOrCreateTag(categoria)
+        const tag_sub_id = await getOrCreateTag(sub_categoria)
+
+        // 3. Crear Lead con nombre "{nombre_completo} - onboarding v2"
+        const tags = []
+        if (tag_cat_id) tags.push({ id: tag_cat_id })
+        else if (categoria) tags.push({ name: categoria })
+        if (tag_sub_id) tags.push({ id: tag_sub_id })
+        else if (sub_categoria) tags.push({ name: sub_categoria })
+
+        const lead_data = {
+            name: `${nombre_completo} - onboarding v2`,
+            pipeline_id,
+            status_id: etapa_id,
+            _embedded: {
+                contacts: [{ id: contacto_id }],
+                tags
+            }
+        }
+        const lr = await kommo_api.post('/leads', [lead_data])
+        const lead_id = lr.data._embedded.leads[0].id
+        console.log('Preston v2 - Lead creado:', lead_id)
+
+        // 4. Nota con el resto de los datos del Paso 2
+        const nota_lines = ['📋 Onboarding v2 — Paso 2', '']
+        if (situacion_laboral) nota_lines.push(`Situación laboral: ${situacion_laboral}`)
+        if (sub_categoria) nota_lines.push(`Sub-categoría: ${sub_categoria}`)
+        if (motivo_yafue) nota_lines.push(`Motivo YAFUE: ${motivo_yafue}`)
+        if (jurisdiccion) nota_lines.push(`Jurisdicción: ${jurisdiccion}`)
+        if (email) nota_lines.push(`Email: ${email}`)
+        if (nota_lines.length > 2) {
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: nota_lines.join('\n') }
+                }])
+            } catch (noteErr) {
+                console.error('Preston v2 - Error creando nota:', noteErr.response?.data || noteErr.message)
+            }
+        }
+
+        res.json({
+            success: true,
+            lead_id,
+            contacto_id,
+            mensaje: 'Contacto y Lead creados en Kommo (Preston v2)'
+        })
+
+    } catch (error) {
+        console.error('Preston v2 - Error POST:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al procesar Preston v2',
+            detalles: error.response?.data || error.message
+        })
+    }
+})
+
+// PATCH /preston-v2/:leadId → Paso 3: enriquece el lead con datos textuales y adjuntos
+app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
+    const subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
+    const token = process.env.KOMMO_PRESTON_TOKEN
+    const leadId = req.params.leadId
+
+    try {
+        let data = {}
+        if (req.body.data) {
+            try { data = JSON.parse(req.body.data) } catch (e) { /* body sin data JSON válido: seguir con vacío */ }
+        }
+
+        const kommo_api = axios.create({
+            baseURL: `https://${subdominio}.kommo.com/api/v4`,
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+        })
+
+        // 1. Nota con datos textuales del Paso 3
+        const nota_lines = ['📋 Onboarding v2 — Paso 3', '']
+        if (data.disponible) nota_lines.push(`Disponible por decreto: ${data.disponible}`)
+        if (data.disponible_afectacion) nota_lines.push(`Disponible de afectación: ${data.disponible_afectacion}`)
+        if (data.banco) nota_lines.push(`Banco de haberes: ${data.banco}`)
+        if (data.tarjeta) nota_lines.push(`Tiene pagos de tarjeta: ${data.tarjeta}`)
+        if (nota_lines.length > 2) {
+            try {
+                await kommo_api.post(`/leads/${leadId}/notes`, [{
+                    note_type: 'common',
+                    params: { text: nota_lines.join('\n') }
+                }])
+            } catch (noteErr) {
+                console.error('Preston v2 - Error creando nota Paso 3:', noteErr.response?.data || noteErr.message)
+            }
+        }
+
+        // 2. Adjuntar archivos al lead vía drive de Kommo
+        const files = req.files || []
+        let files_uploaded = 0
+        if (files.length > 0) {
+            const accountResponse = await axios.get(
+                `https://${subdominio}.kommo.com/api/v4/account?with=drive_url`,
+                { headers: { 'Authorization': `Bearer ${token}` } }
+            )
+            const driveUrl = accountResponse.data.drive_url
+
+            for (const file of files) {
+                try {
+                    // a. Abrir sesión de carga
+                    const sessionResponse = await axios.post(
+                        `${driveUrl}/v1.0/sessions`,
+                        { file_name: file.originalname, file_size: file.buffer.length },
+                        { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+                    )
+                    const { upload_url, max_part_size } = sessionResponse.data
+
+                    // b. Subir en partes
+                    let currentUrl = upload_url
+                    let offset = 0
+                    let fileData = null
+                    while (offset < file.buffer.length) {
+                        const partSize = Math.min(max_part_size, file.buffer.length - offset)
+                        const part = file.buffer.slice(offset, offset + partSize)
+                        const uploadResponse = await axios.post(currentUrl, part, {
+                            headers: { 'Content-Type': 'application/octet-stream' }
+                        })
+                        if (uploadResponse.data.uuid) fileData = uploadResponse.data
+                        else if (uploadResponse.data.next_url) currentUrl = uploadResponse.data.next_url
+                        offset += partSize
+                    }
+
+                    // c. Adjuntar al lead
+                    if (fileData) {
+                        await axios.put(
+                            `https://${subdominio}.kommo.com/api/v4/leads/${leadId}/files`,
+                            [{ file_uuid: fileData.uuid }],
+                            { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+                        )
+                        files_uploaded++
+                        console.log(`Preston v2 - Adjuntado a lead ${leadId}: ${file.originalname} (field ${file.fieldname})`)
+                    }
+                } catch (fileErr) {
+                    console.error(`Preston v2 - Error subiendo ${file.originalname}:`, fileErr.response?.data || fileErr.message)
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            lead_id: leadId,
+            files_uploaded,
+            mensaje: 'Lead enriquecido en Kommo (Preston v2)'
+        })
+
+    } catch (error) {
+        console.error('Preston v2 - Error PATCH:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al enriquecer lead Preston v2',
+            detalles: error.response?.data || error.message
+        })
+    }
+})
+
 // Pazcel: Ruta para manejar la respuestas del formulario web
 app.post('/api/pazcel', async (req, res) => {
     try {
