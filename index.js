@@ -553,25 +553,50 @@ app.post('/preston-v2', async (req, res) => {
         const tag_cat_id = await getOrCreateTag(categoria)
         const tag_sub_id = await getOrCreateTag(sub_categoria)
 
-        // 3. Crear Lead con nombre "{nombre_completo} - onboarding v2"
-        const tags = []
-        if (tag_cat_id) tags.push({ id: tag_cat_id })
-        else if (categoria) tags.push({ name: categoria })
-        if (tag_sub_id) tags.push({ id: tag_sub_id })
-        else if (sub_categoria) tags.push({ name: sub_categoria })
-
-        const lead_data = {
-            name: `${nombre_completo} - onboarding v2`,
-            pipeline_id,
-            status_id: etapa_id,
-            _embedded: {
-                contacts: [{ id: contacto_id }],
-                tags
+        // 3. Verificar si el contacto ya tiene un lead ACTIVO en el pipeline caliente.
+        //    Si sí, se reutiliza en vez de crear uno nuevo (evita duplicados).
+        //    "Activo" = no está en 142 (Ganados) ni en 143 (Perdidos).
+        let lead_existente = null
+        try {
+            const q = `/leads?filter[contacts][]=${contacto_id}&filter[pipeline_id]=${pipeline_id}&limit=50`
+            const r = await kommo_api.get(q)
+            const leads_del_contacto = r.data?._embedded?.leads || []
+            lead_existente = leads_del_contacto.find(l => l.status_id !== 142 && l.status_id !== 143) || null
+            if (lead_existente) {
+                console.log(`Preston v2 - Lead existente encontrado: ${lead_existente.id} (status ${lead_existente.status_id}). Reutilizando.`)
+            }
+        } catch (e) {
+            if (e.response?.status !== 204) {
+                console.error('Preston v2 - Error buscando leads existentes:', e.response?.data || e.message)
             }
         }
-        const lr = await kommo_api.post('/leads', [lead_data])
-        const lead_id = lr.data._embedded.leads[0].id
-        console.log('Preston v2 - Lead creado:', lead_id)
+
+        let lead_id
+        let lead_reutilizado = false
+        if (lead_existente) {
+            lead_id = lead_existente.id
+            lead_reutilizado = true
+        } else {
+            // 3b. Crear lead nuevo con nombre "{nombre_completo} - onboarding v2"
+            const tags = []
+            if (tag_cat_id) tags.push({ id: tag_cat_id })
+            else if (categoria) tags.push({ name: categoria })
+            if (tag_sub_id) tags.push({ id: tag_sub_id })
+            else if (sub_categoria) tags.push({ name: sub_categoria })
+
+            const lead_data = {
+                name: `${nombre_completo} - onboarding v2`,
+                pipeline_id,
+                status_id: etapa_id,
+                _embedded: {
+                    contacts: [{ id: contacto_id }],
+                    tags
+                }
+            }
+            const lr = await kommo_api.post('/leads', [lead_data])
+            lead_id = lr.data._embedded.leads[0].id
+            console.log('Preston v2 - Lead creado:', lead_id)
+        }
 
         // 4. Nota con el resto de los datos del Paso 2
         const nota_lines = ['📋 Onboarding v2 — Paso 2', '']
@@ -595,7 +620,10 @@ app.post('/preston-v2', async (req, res) => {
             success: true,
             lead_id,
             contacto_id,
-            mensaje: 'Contacto y Lead creados en Kommo (Preston v2)'
+            lead_reutilizado,
+            mensaje: lead_reutilizado
+                ? 'Contacto y Lead ya existían, reutilizados (Preston v2)'
+                : 'Contacto y Lead creados en Kommo (Preston v2)'
         })
 
     } catch (error) {
