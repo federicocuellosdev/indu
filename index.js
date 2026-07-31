@@ -556,14 +556,24 @@ app.post('/preston-v2', async (req, res) => {
         // 3. Verificar si el contacto ya tiene un lead ACTIVO en el pipeline caliente.
         //    Si sí, se reutiliza en vez de crear uno nuevo (evita duplicados).
         //    "Activo" = no está en 142 (Ganados) ni en 143 (Perdidos).
+        //    NOTA: `filter[contacts][]` en /leads no filtra realmente por contacto
+        //    (Kommo lo ignora). Vamos por /contacts/{id}?with=leads para obtener
+        //    los IDs vinculados y después traemos esos leads.
         let lead_existente = null
         try {
-            const q = `/leads?filter[contacts][]=${contacto_id}&filter[pipeline_id]=${pipeline_id}&limit=50`
-            const r = await kommo_api.get(q)
-            const leads_del_contacto = r.data?._embedded?.leads || []
-            lead_existente = leads_del_contacto.find(l => l.status_id !== 142 && l.status_id !== 143) || null
-            if (lead_existente) {
-                console.log(`Preston v2 - Lead existente encontrado: ${lead_existente.id} (status ${lead_existente.status_id}). Reutilizando.`)
+            const cr = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
+            const leadIds = (cr.data?._embedded?.leads || []).map(l => l.id)
+            if (leadIds.length > 0) {
+                const idsQS = leadIds.map(id => `filter[id][]=${id}`).join('&')
+                const lr = await kommo_api.get(`/leads?${idsQS}&limit=250`)
+                const leads = lr.data?._embedded?.leads || []
+                lead_existente = leads.find(l =>
+                    l.pipeline_id === pipeline_id &&
+                    l.status_id !== 142 && l.status_id !== 143
+                ) || null
+                if (lead_existente) {
+                    console.log(`Preston v2 - Lead existente encontrado: ${lead_existente.id} (status ${lead_existente.status_id}). Reutilizando.`)
+                }
             }
         } catch (e) {
             if (e.response?.status !== 204) {
