@@ -437,12 +437,19 @@ const uploadPrestonV2 = multer({
     }
 })
 
+// Preston v2 — pipeline "Embudo leads calientes" (14199764)
+//   Paso 2 → ONBOARDING INCOMPLETO (109639704)
+//   Paso 3 → leads entrantes onboarding (109632916)
+const PRESTON_V2_PIPELINE_ID = 14199764
+const PRESTON_V2_ETAPA_INCOMPLETO = 109639704
+const PRESTON_V2_ETAPA_COMPLETO = 109632916
+
 // POST /preston-v2 → Paso 2: crea contacto + lead con tags y devuelve { lead_id }
 app.post('/preston-v2', async (req, res) => {
     const subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
     const token = process.env.KOMMO_PRESTON_TOKEN
-    const pipeline_id = 8704063        // Embudo de ventas
-    const etapa_id = 68359371          // INGRESO
+    const pipeline_id = PRESTON_V2_PIPELINE_ID
+    const etapa_id = PRESTON_V2_ETAPA_INCOMPLETO
 
     try {
         const {
@@ -686,10 +693,21 @@ app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
             }
         }
 
+        // 3. Mover el lead a la etapa "completo" (Paso 3 finalizado)
+        let etapa_actualizada = false
+        try {
+            await kommo_api.patch(`/leads/${leadId}`, { status_id: PRESTON_V2_ETAPA_COMPLETO })
+            etapa_actualizada = true
+            console.log(`Preston v2 - Lead ${leadId} movido a etapa COMPLETO (${PRESTON_V2_ETAPA_COMPLETO})`)
+        } catch (stageErr) {
+            console.error('Preston v2 - Error moviendo lead a COMPLETO:', stageErr.response?.data || stageErr.message)
+        }
+
         res.json({
             success: true,
             lead_id: leadId,
             files_uploaded,
+            etapa_actualizada,
             mensaje: 'Lead enriquecido en Kommo (Preston v2)'
         })
 
