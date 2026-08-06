@@ -443,6 +443,9 @@ const uploadPrestonV2 = multer({
 const PRESTON_V2_PIPELINE_ID = 14199764
 const PRESTON_V2_ETAPA_INCOMPLETO = 109639704
 const PRESTON_V2_ETAPA_COMPLETO = 109632916
+// Custom field "Teléfono" en Lead. Se replica el número del contacto acá para
+// que Kommo pueda matchear el chat de WhatsApp al lead correcto.
+const PRESTON_V2_LEAD_TELEFONO_FIELD_ID = 1990819
 
 // POST /preston-v2 → Paso 2: crea contacto + lead con tags y devuelve { lead_id }
 app.post('/preston-v2', async (req, res) => {
@@ -598,6 +601,12 @@ app.post('/preston-v2', async (req, res) => {
                 name: `${nombre_completo} - onboarding v2`,
                 pipeline_id,
                 status_id: etapa_id,
+                custom_fields_values: [
+                    {
+                        field_id: PRESTON_V2_LEAD_TELEFONO_FIELD_ID,
+                        values: [{ value: telefono_normalizado }]
+                    }
+                ],
                 _embedded: {
                     contacts: [{ id: contacto_id }],
                     tags
