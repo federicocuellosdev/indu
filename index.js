@@ -437,15 +437,21 @@ const uploadPrestonV2 = multer({
     }
 })
 
-// Preston v2 — pipeline "Embudo leads calientes" (14199764)
+// Preston v2 — pipeline "Embudo leads onboarding" (14199764)
 //   Paso 2 → ONBOARDING INCOMPLETO (109639704)
 //   Paso 3 → leads entrantes onboarding (109632916)
 const PRESTON_V2_PIPELINE_ID = 14199764
 const PRESTON_V2_ETAPA_INCOMPLETO = 109639704
 const PRESTON_V2_ETAPA_COMPLETO = 109632916
+// Pipeline v1 "En desuso: Embudo de ventas". Si un lead activo del contacto
+// vive acá, se transfiere al pipeline onboarding en vez de crear uno nuevo.
+const PRESTON_V1_LEGACY_PIPELINE_ID = 8704063
 // Custom field "Teléfono" en Lead. Se replica el número del contacto acá para
 // que Kommo pueda matchear el chat de WhatsApp al lead correcto.
 const PRESTON_V2_LEAD_TELEFONO_FIELD_ID = 1990819
+// Custom field "intento" en Lead. Cuenta cuántas veces el contacto retomó
+// el onboarding (1 al crear, +1 en cada reutilización).
+const PRESTON_V2_LEAD_INTENTO_FIELD_ID = 1990845
 
 // POST /preston-v2 → Paso 2: crea contacto + lead con tags y devuelve { lead_id }
 app.post('/preston-v2', async (req, res) => {
@@ -556,12 +562,13 @@ app.post('/preston-v2', async (req, res) => {
         const tag_cat_id = await getOrCreateTag(categoria)
         const tag_sub_id = await getOrCreateTag(sub_categoria)
 
-        // 3. Verificar si el contacto ya tiene un lead ACTIVO en el pipeline caliente.
-        //    Si sí, se reutiliza en vez de crear uno nuevo (evita duplicados).
+        // 3. Verificar si el contacto ya tiene un lead ACTIVO en los pipelines
+        //    aceptados: el nuevo (onboarding) y el viejo (v1 legacy en desuso).
         //    "Activo" = no está en 142 (Ganados) ni en 143 (Perdidos).
         //    NOTA: `filter[contacts][]` en /leads no filtra realmente por contacto
         //    (Kommo lo ignora). Vamos por /contacts/{id}?with=leads para obtener
         //    los IDs vinculados y después traemos esos leads.
+        const PIPELINES_ACEPTADOS = [PRESTON_V2_PIPELINE_ID, PRESTON_V1_LEGACY_PIPELINE_ID]
         let lead_existente = null
         try {
             const cr = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
@@ -570,12 +577,13 @@ app.post('/preston-v2', async (req, res) => {
                 const idsQS = leadIds.map(id => `filter[id][]=${id}`).join('&')
                 const lr = await kommo_api.get(`/leads?${idsQS}&limit=250`)
                 const leads = lr.data?._embedded?.leads || []
-                lead_existente = leads.find(l =>
-                    l.pipeline_id === pipeline_id &&
-                    l.status_id !== 142 && l.status_id !== 143
-                ) || null
+                // Prioridad: el pipeline onboarding gana sobre el legacy si hay leads en ambos
+                lead_existente =
+                    leads.find(l => l.pipeline_id === PRESTON_V2_PIPELINE_ID && l.status_id !== 142 && l.status_id !== 143) ||
+                    leads.find(l => l.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID && l.status_id !== 142 && l.status_id !== 143) ||
+                    null
                 if (lead_existente) {
-                    console.log(`Preston v2 - Lead existente encontrado: ${lead_existente.id} (status ${lead_existente.status_id}). Reutilizando.`)
+                    console.log(`Preston v2 - Lead existente: ${lead_existente.id} (pipeline ${lead_existente.pipeline_id}, status ${lead_existente.status_id}). Reutilizando.`)
                 }
             }
         } catch (e) {
@@ -586,11 +594,50 @@ app.post('/preston-v2', async (req, res) => {
 
         let lead_id
         let lead_reutilizado = false
+        let lead_transferido = false
+        let intento_actual = 0
         if (lead_existente) {
             lead_id = lead_existente.id
             lead_reutilizado = true
+
+            // Leer el intento actual del lead
+            const intento_field = (lead_existente.custom_fields_values || [])
+                .find(f => f.field_id === PRESTON_V2_LEAD_INTENTO_FIELD_ID)
+            intento_actual = parseInt(intento_field?.values?.[0]?.value || 0, 10) || 0
+            const nuevo_intento = intento_actual + 1
+
+            // Preparar update. Si viene del pipeline legacy, transferir al onboarding.
+            const update = {
+                custom_fields_values: [
+                    { field_id: PRESTON_V2_LEAD_INTENTO_FIELD_ID, values: [{ value: nuevo_intento }] }
+                ]
+            }
+            if (lead_existente.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID) {
+                update.pipeline_id = PRESTON_V2_PIPELINE_ID
+                update.status_id = PRESTON_V2_ETAPA_INCOMPLETO
+                lead_transferido = true
+            }
+            try {
+                await kommo_api.patch(`/leads/${lead_id}`, update)
+                console.log(`Preston v2 - Lead ${lead_id} actualizado (intento ${nuevo_intento}${lead_transferido ? ', transferido de legacy' : ''})`)
+            } catch (updErr) {
+                console.error('Preston v2 - Error actualizando lead reutilizado:', updErr.response?.data || updErr.message)
+            }
+
+            // Nota con la fecha del nuevo intento
+            const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })
+            const nota_txt = `🔁 Nuevo intento #${nuevo_intento} — ${fecha}` +
+                (lead_transferido ? '\nLead transferido desde "En desuso: Embudo de ventas" al Embudo leads onboarding.' : '')
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: nota_txt }
+                }])
+            } catch (noteErr) {
+                console.error('Preston v2 - Error creando nota de intento:', noteErr.response?.data || noteErr.message)
+            }
         } else {
-            // 3b. Crear lead nuevo con nombre "{nombre_completo} - onboarding v2"
+            // 3b. Crear lead nuevo con nombre "{nombre_completo} - onboarding v2" e intento=1
             const tags = []
             if (tag_cat_id) tags.push({ id: tag_cat_id })
             else if (categoria) tags.push({ name: categoria })
@@ -602,10 +649,8 @@ app.post('/preston-v2', async (req, res) => {
                 pipeline_id,
                 status_id: etapa_id,
                 custom_fields_values: [
-                    {
-                        field_id: PRESTON_V2_LEAD_TELEFONO_FIELD_ID,
-                        values: [{ value: telefono_normalizado }]
-                    }
+                    { field_id: PRESTON_V2_LEAD_TELEFONO_FIELD_ID, values: [{ value: telefono_normalizado }] },
+                    { field_id: PRESTON_V2_LEAD_INTENTO_FIELD_ID, values: [{ value: 1 }] }
                 ],
                 _embedded: {
                     contacts: [{ id: contacto_id }],
@@ -614,7 +659,7 @@ app.post('/preston-v2', async (req, res) => {
             }
             const lr = await kommo_api.post('/leads', [lead_data])
             lead_id = lr.data._embedded.leads[0].id
-            console.log('Preston v2 - Lead creado:', lead_id)
+            console.log('Preston v2 - Lead creado (intento=1):', lead_id)
         }
 
         // 4. Nota con el resto de los datos del Paso 2
@@ -640,8 +685,12 @@ app.post('/preston-v2', async (req, res) => {
             lead_id,
             contacto_id,
             lead_reutilizado,
+            lead_transferido,
+            intento: lead_reutilizado ? intento_actual + 1 : 1,
             mensaje: lead_reutilizado
-                ? 'Contacto y Lead ya existían, reutilizados (Preston v2)'
+                ? (lead_transferido
+                    ? 'Lead reutilizado y transferido de "En desuso" a Embudo onboarding (Preston v2)'
+                    : 'Contacto y Lead ya existían, reutilizados (Preston v2)')
                 : 'Contacto y Lead creados en Kommo (Preston v2)'
         })
 
