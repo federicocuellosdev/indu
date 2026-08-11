@@ -607,10 +607,13 @@ app.post('/preston-v2', async (req, res) => {
             lead_id = lead_existente.id
             lead_reutilizado = true
 
-            // Leer el intento actual del lead
+            // Leer el intento actual del lead. Si el campo no existe (lead
+            // previo a la introducción de "intento") su existencia igual
+            // cuenta como intento #1, así el reintento actual queda como #2.
             const intento_field = (lead_existente.custom_fields_values || [])
                 .find(f => f.field_id === PRESTON_V2_LEAD_INTENTO_FIELD_ID)
-            intento_actual = parseInt(intento_field?.values?.[0]?.value || 0, 10) || 0
+            const intento_leido = parseInt(intento_field?.values?.[0]?.value || 0, 10) || 0
+            intento_actual = Math.max(intento_leido, 1)
             const nuevo_intento = intento_actual + 1
 
             // Update completo: refresca nombre, teléfono, tags e intento con los
