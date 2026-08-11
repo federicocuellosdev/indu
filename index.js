@@ -592,6 +592,13 @@ app.post('/preston-v2', async (req, res) => {
             }
         }
 
+        // Tags a aplicar al lead (mismos para creación y reutilización)
+        const tags = []
+        if (tag_cat_id) tags.push({ id: tag_cat_id })
+        else if (categoria) tags.push({ name: categoria })
+        if (tag_sub_id) tags.push({ id: tag_sub_id })
+        else if (sub_categoria) tags.push({ name: sub_categoria })
+
         let lead_id
         let lead_reutilizado = false
         let lead_transferido = false
@@ -606,11 +613,16 @@ app.post('/preston-v2', async (req, res) => {
             intento_actual = parseInt(intento_field?.values?.[0]?.value || 0, 10) || 0
             const nuevo_intento = intento_actual + 1
 
-            // Preparar update. Si viene del pipeline legacy, transferir al onboarding.
+            // Update completo: refresca nombre, teléfono, tags e intento con los
+            // datos nuevos que el usuario cargó en el onboarding v2. Si el lead
+            // vivía en el pipeline legacy, además se transfiere al onboarding.
             const update = {
+                name: `${nombre_completo} - onboarding v2`,
                 custom_fields_values: [
+                    { field_id: PRESTON_V2_LEAD_TELEFONO_FIELD_ID, values: [{ value: telefono_normalizado }] },
                     { field_id: PRESTON_V2_LEAD_INTENTO_FIELD_ID, values: [{ value: nuevo_intento }] }
-                ]
+                ],
+                _embedded: { tags }
             }
             if (lead_existente.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID) {
                 update.pipeline_id = PRESTON_V2_PIPELINE_ID
@@ -638,12 +650,6 @@ app.post('/preston-v2', async (req, res) => {
             }
         } else {
             // 3b. Crear lead nuevo con nombre "{nombre_completo} - onboarding v2" e intento=1
-            const tags = []
-            if (tag_cat_id) tags.push({ id: tag_cat_id })
-            else if (categoria) tags.push({ name: categoria })
-            if (tag_sub_id) tags.push({ id: tag_sub_id })
-            else if (sub_categoria) tags.push({ name: sub_categoria })
-
             const lead_data = {
                 name: `${nombre_completo} - onboarding v2`,
                 pipeline_id,
