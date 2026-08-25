@@ -456,11 +456,15 @@ const PRESTON_V2_LEAD_INTENTO_FIELD_ID = 1990845
 // YAFUE — cuenta Kommo separada (soporteyafuear). Los leads con
 // categoria='YAFUE' se derivan acá en vez de a Preston.
 const YAFUE_PIPELINE_ID = 14176460          // "Proceso comercial"
-const YAFUE_ETAPA_INCOMING = 110808324      // "INGRESO PRESTON" (etapa dedicada)
+const YAFUE_ETAPA_INCOMING = 110808324      // "INGRESO PRESTON"
+// Custom fields creados en la cuenta YAFUE (paridad con Preston).
+const YAFUE_LEAD_TELEFONO_FIELD_ID = 1748293    // Lead · "Teléfono"
+const YAFUE_LEAD_INTENTO_FIELD_ID = 1748289     // Lead · "intento"
+const YAFUE_CONTACT_DNI_FIELD_ID = 1748291      // Contact · "DNI"
 
-// Handler auxiliar: crea contacto + lead en la cuenta YAFUE y responde.
-// YAFUE no comparte los custom fields de Preston (teléfono en lead, intento)
-// ni el pipeline legacy, por eso el flujo es más simple.
+// Handler: crea/reutiliza contacto + lead en la cuenta YAFUE con la MISMA
+// lógica que el flujo Preston (dedupe, reutilización, intento++, nota de
+// intento, nota Paso 2, tags, custom fields de teléfono e intento).
 async function handlePrestonV2Yafue(req, res, datos) {
     const subdominio = process.env.KOMMO_YAFUE_SUBDOMINIO
     const token = process.env.KOMMO_YAFUE_TOKEN
@@ -482,7 +486,7 @@ async function handlePrestonV2Yafue(req, res, datos) {
     })
 
     try {
-        // 1. Reutilizar contacto por tel/DNI si existe (dentro de la cuenta YAFUE)
+        // 0. Buscar contacto duplicado por teléfono o DNI (misma lógica que Preston)
         async function buscarContacto(query) {
             try {
                 const r = await kommo_api.get(`/contacts?query=${encodeURIComponent(query)}&limit=10`)
@@ -498,11 +502,17 @@ async function handlePrestonV2Yafue(req, res, datos) {
         ]
         const duplicado = candidatos.find(c => {
             const fields = c.custom_fields_values || []
-            return fields.some(f => f.field_code === 'PHONE' && f.values.some(v => {
+            const telMatch = fields.some(f => f.field_code === 'PHONE' && f.values.some(v => {
                 const num = (v.value || '').replace(/[^0-9]/g, '')
                 return num && (num === telefono_normalizado || num.endsWith(telefono_normalizado.slice(-10)))
             }))
+            const dniMatch = dni_normalizado && fields.some(f => f.field_id === YAFUE_CONTACT_DNI_FIELD_ID && f.values.some(v =>
+                String(v.value || '').replace(/[^0-9]/g, '') === dni_normalizado
+            ))
+            return telMatch || dniMatch
         })
+
+        // 1. Crear o reutilizar contacto
         let contacto_id
         if (duplicado) {
             contacto_id = duplicado.id
@@ -515,6 +525,11 @@ async function handlePrestonV2Yafue(req, res, datos) {
                     { field_code: 'PHONE', values: [{ enum_code: 'WORK', value: telefono_normalizado }] }
                 ]
             }
+            if (dni_normalizado) {
+                contacto_data.custom_fields_values.push({
+                    field_id: YAFUE_CONTACT_DNI_FIELD_ID, values: [{ value: dni_normalizado }]
+                })
+            }
             if (email) {
                 contacto_data.custom_fields_values.push({
                     field_code: 'EMAIL', values: [{ enum_code: 'WORK', value: email }]
@@ -524,7 +539,25 @@ async function handlePrestonV2Yafue(req, res, datos) {
             contacto_id = cr.data._embedded.contacts[0].id
         }
 
-        // 2. Reutilizar lead activo del contacto en el pipeline main de YAFUE
+        // 2. Tags: categoría ('YAFUE') + motivo de derivación como sub-tag
+        async function getOrCreateTag(name) {
+            if (!name || !String(name).trim()) return null
+            try {
+                const r = await kommo_api.get('/leads/tags')
+                const existing = r.data?._embedded?.tags?.find(t => t.name.toLowerCase() === String(name).toLowerCase())
+                if (existing) return existing.id
+                const nr = await kommo_api.post('/leads/tags', [{ name }])
+                return nr.data._embedded.tags[0].id
+            } catch (e) { return null }
+        }
+        const tag_cat_id = await getOrCreateTag('YAFUE')
+        const tag_motivo_id = await getOrCreateTag(motivo_yafue)
+        const tags = []
+        if (tag_cat_id) tags.push({ id: tag_cat_id }); else tags.push({ name: 'YAFUE' })
+        if (tag_motivo_id) tags.push({ id: tag_motivo_id })
+        else if (motivo_yafue) tags.push({ name: motivo_yafue })
+
+        // 3. Buscar lead activo del contacto en el pipeline YAFUE
         let lead_existente = null
         try {
             const cr2 = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
@@ -538,42 +571,81 @@ async function handlePrestonV2Yafue(req, res, datos) {
                     l.status_id !== 142 && l.status_id !== 143
                 ) || null
             }
-        } catch (e) { /* si falla, seguimos y creamos */ }
+        } catch (e) { /* seguimos y creamos */ }
 
         let lead_id
         let lead_reutilizado = false
+        let intento_actual = 0
         if (lead_existente) {
             lead_id = lead_existente.id
             lead_reutilizado = true
+
+            const intento_field = (lead_existente.custom_fields_values || [])
+                .find(f => f.field_id === YAFUE_LEAD_INTENTO_FIELD_ID)
+            const intento_leido = parseInt(intento_field?.values?.[0]?.value || 0, 10) || 0
+            intento_actual = Math.max(intento_leido, 1)
+            const nuevo_intento = intento_actual + 1
+
+            // Update completo: refresca nombre, tags, teléfono, intento con
+            // los datos del intento actual.
+            const update = {
+                name: `${nombre_completo} - onboarding v2`,
+                custom_fields_values: [
+                    { field_id: YAFUE_LEAD_TELEFONO_FIELD_ID, values: [{ value: telefono_normalizado }] },
+                    { field_id: YAFUE_LEAD_INTENTO_FIELD_ID, values: [{ value: nuevo_intento }] }
+                ],
+                _embedded: { tags }
+            }
+            try {
+                await kommo_api.patch(`/leads/${lead_id}`, update)
+            } catch (updErr) {
+                console.error('YAFUE - Error actualizando lead reutilizado:', updErr.response?.data || updErr.message)
+            }
+
+            // Nota "Nuevo intento #N — fecha"
+            const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: `🔁 Nuevo intento #${nuevo_intento} — ${fecha}` }
+                }])
+            } catch (e) { /* soft-fail */ }
         } else {
+            // Crear lead nuevo con intento=1
             const lead_data = {
-                name: `${nombre_completo} - onboarding v2 (Preston→YAFUE)`,
+                name: `${nombre_completo} - onboarding v2`,
                 pipeline_id: YAFUE_PIPELINE_ID,
                 status_id: YAFUE_ETAPA_INCOMING,
-                _embedded: { contacts: [{ id: contacto_id }] }
+                custom_fields_values: [
+                    { field_id: YAFUE_LEAD_TELEFONO_FIELD_ID, values: [{ value: telefono_normalizado }] },
+                    { field_id: YAFUE_LEAD_INTENTO_FIELD_ID, values: [{ value: 1 }] }
+                ],
+                _embedded: { contacts: [{ id: contacto_id }], tags }
             }
             const lr = await kommo_api.post('/leads', [lead_data])
             lead_id = lr.data._embedded.leads[0].id
         }
 
-        // 3. Nota con el contexto del derivado
-        const nota_lines = ['📋 Onboarding v2 — Preston → YAFUE', '']
-        if (motivo_yafue) nota_lines.push(`Motivo derivación: ${motivo_yafue}`)
+        // 4. Nota Paso 2 con los datos del intento actual (siempre)
+        const nota_lines = ['📋 Onboarding v2 — Paso 2 (Preston → YAFUE)', '']
+        nota_lines.push(`Motivo derivación: ${motivo_yafue || '-'}`)
         if (situacion_laboral) nota_lines.push(`Situación laboral: ${situacion_laboral}`)
         if (jurisdiccion) nota_lines.push(`Jurisdicción: ${jurisdiccion}`)
-        if (dni_normalizado) nota_lines.push(`DNI: ${dni_normalizado}`)
         if (email) nota_lines.push(`Email: ${email}`)
         try {
             await kommo_api.post(`/leads/${lead_id}/notes`, [{
                 note_type: 'common',
                 params: { text: nota_lines.join('\n') }
             }])
-        } catch (noteErr) { /* soft-fail */ }
+        } catch (e) { /* soft-fail */ }
 
         return res.json({
             success: true,
             destino: 'yafue',
-            lead_id, contacto_id, lead_reutilizado,
+            lead_id,
+            contacto_id,
+            lead_reutilizado,
+            intento: lead_reutilizado ? intento_actual + 1 : 1,
             mensaje: lead_reutilizado
                 ? 'Contacto y Lead ya existían en YAFUE, reutilizados'
                 : 'Contacto y Lead creados en YAFUE'
