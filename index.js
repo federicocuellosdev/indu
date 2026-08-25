@@ -453,6 +453,142 @@ const PRESTON_V2_LEAD_TELEFONO_FIELD_ID = 1990819
 // el onboarding (1 al crear, +1 en cada reutilización).
 const PRESTON_V2_LEAD_INTENTO_FIELD_ID = 1990845
 
+// YAFUE — cuenta Kommo separada (soporteyafuear). Los leads con
+// categoria='YAFUE' se derivan acá en vez de a Preston.
+const YAFUE_PIPELINE_ID = 12768511         // "Embudo de ventas" (main de YAFUE)
+const YAFUE_ETAPA_INCOMING = 98526803       // "Incoming leads"
+
+// Handler auxiliar: crea contacto + lead en la cuenta YAFUE y responde.
+// YAFUE no comparte los custom fields de Preston (teléfono en lead, intento)
+// ni el pipeline legacy, por eso el flujo es más simple.
+async function handlePrestonV2Yafue(req, res, datos) {
+    const subdominio = process.env.KOMMO_YAFUE_SUBDOMINIO
+    const token = process.env.KOMMO_YAFUE_TOKEN
+    if (!subdominio || !token) {
+        return res.status(500).json({
+            success: false,
+            mensaje: 'YAFUE no configurado (faltan KOMMO_YAFUE_SUBDOMINIO / KOMMO_YAFUE_TOKEN).'
+        })
+    }
+    const {
+        categoria, motivo_yafue, situacion_laboral, jurisdiccion,
+        nombre, apellido, telefono_normalizado, dni_normalizado, email,
+        nombre_completo
+    } = datos
+
+    const kommo_api = axios.create({
+        baseURL: `https://${subdominio}.kommo.com/api/v4`,
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+    })
+
+    try {
+        // 1. Reutilizar contacto por tel/DNI si existe (dentro de la cuenta YAFUE)
+        async function buscarContacto(query) {
+            try {
+                const r = await kommo_api.get(`/contacts?query=${encodeURIComponent(query)}&limit=10`)
+                return r.data?._embedded?.contacts || []
+            } catch (e) {
+                if (e.response?.status === 204) return []
+                throw e
+            }
+        }
+        const candidatos = [
+            ...(await buscarContacto(telefono_normalizado)),
+            ...(dni_normalizado ? await buscarContacto(dni_normalizado) : [])
+        ]
+        const duplicado = candidatos.find(c => {
+            const fields = c.custom_fields_values || []
+            return fields.some(f => f.field_code === 'PHONE' && f.values.some(v => {
+                const num = (v.value || '').replace(/[^0-9]/g, '')
+                return num && (num === telefono_normalizado || num.endsWith(telefono_normalizado.slice(-10)))
+            }))
+        })
+        let contacto_id
+        if (duplicado) {
+            contacto_id = duplicado.id
+        } else {
+            const contacto_data = {
+                name: nombre_completo,
+                first_name: nombre,
+                last_name: apellido,
+                custom_fields_values: [
+                    { field_code: 'PHONE', values: [{ enum_code: 'WORK', value: telefono_normalizado }] }
+                ]
+            }
+            if (email) {
+                contacto_data.custom_fields_values.push({
+                    field_code: 'EMAIL', values: [{ enum_code: 'WORK', value: email }]
+                })
+            }
+            const cr = await kommo_api.post('/contacts', [contacto_data])
+            contacto_id = cr.data._embedded.contacts[0].id
+        }
+
+        // 2. Reutilizar lead activo del contacto en el pipeline main de YAFUE
+        let lead_existente = null
+        try {
+            const cr2 = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
+            const leadIds = (cr2.data?._embedded?.leads || []).map(l => l.id)
+            if (leadIds.length > 0) {
+                const idsQS = leadIds.map(id => `filter[id][]=${id}`).join('&')
+                const lr = await kommo_api.get(`/leads?${idsQS}&limit=250`)
+                const leads = lr.data?._embedded?.leads || []
+                lead_existente = leads.find(l =>
+                    l.pipeline_id === YAFUE_PIPELINE_ID &&
+                    l.status_id !== 142 && l.status_id !== 143
+                ) || null
+            }
+        } catch (e) { /* si falla, seguimos y creamos */ }
+
+        let lead_id
+        let lead_reutilizado = false
+        if (lead_existente) {
+            lead_id = lead_existente.id
+            lead_reutilizado = true
+        } else {
+            const lead_data = {
+                name: `${nombre_completo} - onboarding v2 (Preston→YAFUE)`,
+                pipeline_id: YAFUE_PIPELINE_ID,
+                status_id: YAFUE_ETAPA_INCOMING,
+                _embedded: { contacts: [{ id: contacto_id }] }
+            }
+            const lr = await kommo_api.post('/leads', [lead_data])
+            lead_id = lr.data._embedded.leads[0].id
+        }
+
+        // 3. Nota con el contexto del derivado
+        const nota_lines = ['📋 Onboarding v2 — Preston → YAFUE', '']
+        if (motivo_yafue) nota_lines.push(`Motivo derivación: ${motivo_yafue}`)
+        if (situacion_laboral) nota_lines.push(`Situación laboral: ${situacion_laboral}`)
+        if (jurisdiccion) nota_lines.push(`Jurisdicción: ${jurisdiccion}`)
+        if (dni_normalizado) nota_lines.push(`DNI: ${dni_normalizado}`)
+        if (email) nota_lines.push(`Email: ${email}`)
+        try {
+            await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                note_type: 'common',
+                params: { text: nota_lines.join('\n') }
+            }])
+        } catch (noteErr) { /* soft-fail */ }
+
+        return res.json({
+            success: true,
+            destino: 'yafue',
+            lead_id, contacto_id, lead_reutilizado,
+            mensaje: lead_reutilizado
+                ? 'Contacto y Lead ya existían en YAFUE, reutilizados'
+                : 'Contacto y Lead creados en YAFUE'
+        })
+    } catch (error) {
+        console.error('Preston v2 → YAFUE - Error:', error.response?.data || error.message)
+        return res.status(500).json({
+            success: false,
+            destino: 'yafue',
+            mensaje: 'Error al procesar en YAFUE',
+            detalles: error.response?.data || error.message
+        })
+    }
+}
+
 // POST /preston-v2 → Paso 2: crea contacto + lead con tags y devuelve { lead_id }
 app.post('/preston-v2', async (req, res) => {
     const subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
@@ -483,6 +619,16 @@ app.post('/preston-v2', async (req, res) => {
             } else if (!telefono_normalizado.startsWith('54')) {
                 telefono_normalizado = '549' + telefono_normalizado
             }
+        }
+
+        // Los leads con categoría YAFUE viven en otra cuenta de Kommo
+        // (soporteyafuear). Se derivan y se cortocircuita el flujo Preston.
+        if (categoria === 'YAFUE') {
+            return handlePrestonV2Yafue(req, res, {
+                categoria, motivo_yafue, situacion_laboral, jurisdiccion,
+                nombre, apellido, telefono_normalizado, dni_normalizado, email,
+                nombre_completo
+            })
         }
 
         const kommo_api = axios.create({
