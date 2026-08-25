@@ -455,8 +455,8 @@ const PRESTON_V2_LEAD_INTENTO_FIELD_ID = 1990845
 
 // YAFUE — cuenta Kommo separada (soporteyafuear). Los leads con
 // categoria='YAFUE' se derivan acá en vez de a Preston.
-const YAFUE_PIPELINE_ID = 12768511         // "Embudo de ventas" (main de YAFUE)
-const YAFUE_ETAPA_INCOMING = 98526803       // "Incoming leads"
+const YAFUE_PIPELINE_ID = 14176460          // "Proceso comercial"
+const YAFUE_ETAPA_INCOMING = 110808324      // "INGRESO PRESTON" (etapa dedicada)
 
 // Handler auxiliar: crea contacto + lead en la cuenta YAFUE y responde.
 // YAFUE no comparte los custom fields de Preston (teléfono en lead, intento)
