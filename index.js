@@ -476,6 +476,7 @@ async function handlePrestonV2Yafue(req, res, datos) {
     }
     const {
         categoria, motivo_yafue, situacion_laboral, jurisdiccion,
+        tipo_label, categoria_label, detalle_label,
         nombre, apellido, telefono_normalizado, dni_normalizado, email,
         nombre_completo
     } = datos
@@ -629,7 +630,10 @@ async function handlePrestonV2Yafue(req, res, datos) {
         // 4. Nota Paso 2 con los datos del intento actual (siempre)
         const nota_lines = ['📋 Onboarding v2 — Paso 2 (Preston → YAFUE)', '']
         nota_lines.push(`Motivo derivación: ${motivo_yafue || '-'}`)
-        if (situacion_laboral) nota_lines.push(`Situación laboral: ${situacion_laboral}`)
+        if (tipo_label) nota_lines.push(`Tipo: ${tipo_label}`)
+        else if (situacion_laboral) nota_lines.push(`Tipo: ${situacion_laboral}`)
+        if (categoria_label) nota_lines.push(`Categoría: ${categoria_label}`)
+        if (detalle_label) nota_lines.push(`Detalle: ${detalle_label}`)
         if (jurisdiccion) nota_lines.push(`Jurisdicción: ${jurisdiccion}`)
         if (email) nota_lines.push(`Email: ${email}`)
         try {
@@ -672,6 +676,7 @@ app.post('/preston-v2', async (req, res) => {
         const {
             categoria, sub_categoria, motivo_yafue,
             situacion_laboral, jurisdiccion,
+            tipo_label, categoria_label, detalle_label,
             nombre, apellido, telefono, dni, email
         } = req.body
 
@@ -698,6 +703,7 @@ app.post('/preston-v2', async (req, res) => {
         if (categoria === 'YAFUE') {
             return handlePrestonV2Yafue(req, res, {
                 categoria, motivo_yafue, situacion_laboral, jurisdiccion,
+                tipo_label, categoria_label, detalle_label,
                 nombre, apellido, telefono_normalizado, dni_normalizado, email,
                 nombre_completo
             })
@@ -891,8 +897,11 @@ app.post('/preston-v2', async (req, res) => {
 
         // 4. Nota con el resto de los datos del Paso 2
         const nota_lines = ['📋 Onboarding v2 — Paso 2', '']
-        if (situacion_laboral) nota_lines.push(`Situación laboral: ${situacion_laboral}`)
-        if (sub_categoria) nota_lines.push(`Sub-categoría: ${sub_categoria}`)
+        if (tipo_label) nota_lines.push(`Tipo: ${tipo_label}`)
+        else if (situacion_laboral) nota_lines.push(`Tipo: ${situacion_laboral}`)
+        if (categoria_label) nota_lines.push(`Categoría: ${categoria_label}`)
+        if (detalle_label) nota_lines.push(`Detalle: ${detalle_label}`)
+        if (sub_categoria && !detalle_label) nota_lines.push(`Sub-categoría: ${sub_categoria}`)
         if (motivo_yafue) nota_lines.push(`Motivo YAFUE: ${motivo_yafue}`)
         if (jurisdiccion) nota_lines.push(`Jurisdicción: ${jurisdiccion}`)
         if (email) nota_lines.push(`Email: ${email}`)
