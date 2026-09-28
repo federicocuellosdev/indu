@@ -2,6 +2,7 @@ require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const axios = require('axios')
+const crypto = require('crypto')
 const multer = require('multer')
 const nodemailer = require('nodemailer')
 const { exchangeCodeForToken, saveStore } = require('./tiendanube/api')
@@ -44,7 +45,9 @@ app.use(cors({
             'https://coas.com.ar',
             'https://www.coas.com.ar',
             'https://talent.breakmkt.com.ar',
-            'https://www.talent.breakmkt.com.ar'
+            'https://www.talent.breakmkt.com.ar',
+            'https://marlaca-realestate.com',
+            'https://www.marlaca-realestate.com'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
@@ -1769,6 +1772,72 @@ app.get('/sync', async (req, res) => {
 })
 
 
+// =====================================================
+// MARLACA: Meta Conversions API (server-side pixel)
+// =====================================================
+const sha256 = v => crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex')
+const normPhone = v => String(v || '').replace(/[^\d]/g, '')
+
+app.post('/marlaca/capi', async (req, res) => {
+    try {
+        const pixelId = process.env.MARLACA_META_PIXEL_ID
+        const token = process.env.MARLACA_META_CAPI_TOKEN
+        if (!pixelId || !token) {
+            return res.status(500).json({ success: false, mensaje: 'CAPI no configurada' })
+        }
+
+        const {
+            event_name = 'Lead',
+            event_id,
+            event_source_url,
+            user_data = {},
+            custom_data = {}
+        } = req.body || {}
+
+        const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress
+        const ua = req.headers['user-agent'] || ''
+
+        const hashed = {}
+        if (user_data.email) hashed.em = sha256(user_data.email)
+        if (user_data.phone) hashed.ph = sha256(normPhone(user_data.phone))
+        if (user_data.first_name) hashed.fn = sha256(user_data.first_name)
+        if (user_data.last_name) hashed.ln = sha256(user_data.last_name)
+        if (user_data.country) hashed.country = sha256(user_data.country)
+        if (user_data.fbp) hashed.fbp = user_data.fbp
+        if (user_data.fbc) hashed.fbc = user_data.fbc
+        if (ip) hashed.client_ip_address = ip
+        if (ua) hashed.client_user_agent = ua
+
+        const payload = {
+            data: [{
+                event_name,
+                event_time: Math.floor(Date.now() / 1000),
+                event_id,
+                event_source_url,
+                action_source: 'website',
+                user_data: hashed,
+                custom_data
+            }]
+        }
+
+        const r = await axios.post(
+            `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${token}`,
+            payload,
+            { timeout: 8000 }
+        )
+
+        res.json({ success: true, meta: r.data })
+    } catch (error) {
+        console.error('Marlaca CAPI - Error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error enviando evento a Meta',
+            detalles: error.response?.data || error.message
+        })
+    }
+})
+
+
 // Iniciar servidor
 app.listen(PORT, () => {
     startCron()
@@ -1783,4 +1852,6 @@ app.listen(PORT, () => {
     console.log('  POST /talent/step2 - Posición y motivación')
     console.log('  POST /talent/step3 - Pretensión salarial')
     console.log('  POST /talent/step4 - Subir CV')
+    console.log('\nEndpoints Marlaca:')
+    console.log('  POST /marlaca/capi - Meta Conversions API (server-side pixel)')
 })
