@@ -1838,6 +1838,44 @@ app.post('/marlaca/capi', async (req, res) => {
 })
 
 
+// =====================================================
+// META: Webhook de Lead Ads (formularios instantáneos)
+// =====================================================
+// GET: handshake de verificación con Meta (hub.challenge)
+app.get('/meta/webhook', (req, res) => {
+    const verifyToken = process.env.META_WEBHOOK_VERIFY_TOKEN
+    const mode = req.query['hub.mode']
+    const token = req.query['hub.verify_token']
+    const challenge = req.query['hub.challenge']
+    if (mode === 'subscribe' && verifyToken && token === verifyToken) {
+        console.log('Meta webhook - verificación OK')
+        return res.status(200).send(challenge)
+    }
+    console.warn('Meta webhook - verificación rechazada', { mode, hasToken: !!token })
+    return res.sendStatus(403)
+})
+
+// POST: recibe eventos de leadgen. Validación HMAC + enqueue para procesar.
+// Nota: el procesamiento del lead (fetch Graph API + alta en Kommo) se agrega
+// cuando tengamos el token con permisos leads_retrieval y el App Secret.
+app.post('/meta/webhook', express.json({
+    verify: (req, _res, buf) => { req.rawBody = buf }
+}), (req, res) => {
+    const appSecret = process.env.META_APP_SECRET
+    const sig = req.headers['x-hub-signature-256']
+    if (appSecret && sig && req.rawBody) {
+        const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.rawBody).digest('hex')
+        if (sig !== expected) {
+            console.warn('Meta webhook - firma inválida')
+            return res.sendStatus(403)
+        }
+    }
+    console.log('Meta webhook - payload recibido:', JSON.stringify(req.body))
+    // TODO: enrutar por page_id → fetch /{leadgen_id} → crear contacto+lead en Kommo
+    res.sendStatus(200)
+})
+
+
 // Iniciar servidor
 app.listen(PORT, () => {
     startCron()
@@ -1854,4 +1892,7 @@ app.listen(PORT, () => {
     console.log('  POST /talent/step4 - Subir CV')
     console.log('\nEndpoints Marlaca:')
     console.log('  POST /marlaca/capi - Meta Conversions API (server-side pixel)')
+    console.log('\nEndpoints Meta Webhook:')
+    console.log('  GET  /meta/webhook - handshake de verificación con Meta')
+    console.log('  POST /meta/webhook - recepción de eventos leadgen')
 })
