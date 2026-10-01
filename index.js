@@ -132,7 +132,7 @@ app.post('/api/kommo-contacto', async (req, res) => {
             baseURL: `https://${subdominio}.kommo.com/api/v4`,
             headers: {
                 'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json; charset=utf-8'
             }
         })
 
@@ -248,7 +248,7 @@ app.post('/preston', async (req, res) => {
             baseURL: `https://${kommo_preston_subdominio}.kommo.com/api/v4`,
             headers: {
                 'Authorization': `Bearer ${kommo_preston_token}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json; charset=utf-8'
             }
         })
 
@@ -488,7 +488,7 @@ async function handlePrestonV2Yafue(req, res, datos) {
 
     const kommo_api = axios.create({
         baseURL: `https://${subdominio}.kommo.com/api/v4`,
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' }
     })
 
     try {
@@ -718,7 +718,7 @@ app.post('/preston-v2', async (req, res) => {
             baseURL: `https://${subdominio}.kommo.com/api/v4`,
             headers: {
                 'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json; charset=utf-8'
             }
         })
 
@@ -959,7 +959,7 @@ app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
 
         const kommo_api = axios.create({
             baseURL: `https://${subdominio}.kommo.com/api/v4`,
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' }
         })
 
         // 1. Nota con datos textuales del Paso 3
@@ -995,7 +995,7 @@ app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
                     const sessionResponse = await axios.post(
                         `${driveUrl}/v1.0/sessions`,
                         { file_name: file.originalname, file_size: file.buffer.length },
-                        { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+                        { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' } }
                     )
                     const { upload_url, max_part_size } = sessionResponse.data
 
@@ -1019,7 +1019,7 @@ app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
                         await axios.put(
                             `https://${subdominio}.kommo.com/api/v4/leads/${leadId}/files`,
                             [{ file_uuid: fileData.uuid }],
-                            { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+                            { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' } }
                         )
                         files_uploaded++
                         console.log(`Preston v2 - Adjuntado a lead ${leadId}: ${file.originalname} (field ${file.fieldname})`)
@@ -1158,7 +1158,7 @@ app.post('/coas', async (req, res) => {
             baseURL: `https://${KOMMO_COAS_SUBDOMINIO}.kommo.com/api/v4`,
             headers: {
                 'Authorization': `Bearer ${KOMMO_COAS_TOKEN}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json; charset=utf-8'
             }
         });
 
@@ -1272,7 +1272,7 @@ app.post('/budabot', async (req, res) => {
             baseURL: `https://${KOMMO_BUDABOT_SUBDOMINIO}.kommo.com/api/v4`,
             headers: {
                 'Authorization': `Bearer ${KOMMO_BUDABOT_TOKEN}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json; charset=utf-8'
             }
         });
 
@@ -1389,7 +1389,7 @@ function createTalentApi() {
         baseURL: `https://${KOMMO_TALENT_SUBDOMINIO}.kommo.com/api/v4`,
         headers: {
             'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json; charset=utf-8'
         }
     })
 }
@@ -1645,7 +1645,7 @@ app.post('/talent/step4', upload.single('cv'), async (req, res) => {
             {
                 headers: {
                     'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`,
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json; charset=utf-8'
                 }
             }
         )
@@ -1684,7 +1684,7 @@ app.post('/talent/step4', upload.single('cv'), async (req, res) => {
                 {
                     headers: {
                         'Authorization': `Bearer ${KOMMO_TALENT_TOKEN}`,
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json; charset=utf-8'
                     }
                 }
             )
@@ -1858,11 +1858,12 @@ app.get('/meta/webhook', (req, res) => {
 })
 
 // --- Config Marlaca (routing + Kommo) -----------------------------------
+// Pipeline: "Generación de demanda" (14547399) · Status: "CONTACTO INICIAL" (112380479)
 const MARLACA_KOMMO = {
     base: 'https://marlaca.kommo.com/api/v4',
     token: process.env.MARLACA_KOMMO_TOKEN,
-    pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14548567', 10),
-    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112390647', 10)
+    pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14547399', 10),
+    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112380479', 10)
 }
 
 const META_PAGE_ROUTING = {
@@ -1911,7 +1912,7 @@ async function kommoCreateContact(cfg, { name, email, phone, phoneAlt }) {
     if (email) custom.push({ field_code: 'EMAIL', values: [{ value: email, enum_code: 'WORK' }] })
     const payload = [{ name: name || 'Sin nombre', custom_fields_values: custom }]
     const r = await axios.post(`${cfg.base}/contacts`, payload, {
-        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json; charset=utf-8' },
         timeout: 10000
     })
     return r.data._embedded.contacts[0].id
@@ -1928,7 +1929,7 @@ async function kommoCreateLead(cfg, { name, contactId, tags }) {
         }
     }]
     const r = await axios.post(`${cfg.base}/leads`, payload, {
-        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json; charset=utf-8' },
         timeout: 10000
     })
     return r.data._embedded.leads[0].id
@@ -1941,7 +1942,7 @@ async function kommoAddNote(cfg, leadId, text) {
         note_type: 'common',
         params: { text }
     }], {
-        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json; charset=utf-8' },
         timeout: 10000
     })
 }
@@ -1951,7 +1952,7 @@ async function fetchMetaLead(leadgenId) {
     const token = process.env.META_SYSTEM_USER_TOKEN
     const version = process.env.META_GRAPH_VERSION || 'v21.0'
     if (!token) throw new Error('META_SYSTEM_USER_TOKEN no configurado')
-    const url = `https://graph.facebook.com/${version}/${leadgenId}?fields=field_data,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,platform,created_time,form_id&access_token=${token}`
+    const url = `https://graph.facebook.com/${version}/${leadgenId}?fields=field_data,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,platform,created_time,form_id,form{name}&access_token=${token}`
     const r = await axios.get(url, { timeout: 10000 })
     return r.data
 }
@@ -1992,8 +1993,9 @@ async function processLeadgen(leadgenId, pageId) {
 
     const tags = [...route.tags]
     if (lead.campaign_name) tags.push(lead.campaign_name)
+    const formName = (lead.form && lead.form.name) || lead.form_id || 'Formulario'
     const leadId = await kommoCreateLead(cfg, {
-        name: `Meta Ad - ${parsed.name}`,
+        name: `Meta Ads - ${formName} - ${parsed.name}`,
         contactId,
         tags
     })
