@@ -1870,7 +1870,7 @@ const META_PAGE_ROUTING = {
     [process.env.MARLACA_META_PAGE_ID || '']: {
         name: 'marlaca',
         kommo: MARLACA_KOMMO,
-        tags: ['Meta Ads', 'Formulario Instantáneo']
+        tags: ['Meta Ads']
     }
 }
 
@@ -1991,9 +1991,8 @@ async function processLeadgen(leadgenId, pageId) {
         name: parsed.name, email: parsed.email, phone: parsed.phone, phoneAlt: parsed.phoneAlt
     })
 
-    const tags = [...route.tags]
-    if (lead.campaign_name) tags.push(lead.campaign_name)
     const formName = (lead.form && lead.form.name) || lead.form_id || 'Formulario'
+    const tags = [...route.tags, formName]
     const leadId = await kommoCreateLead(cfg, {
         name: `Meta Ads - ${formName} - ${parsed.name}`,
         contactId,
@@ -2084,9 +2083,7 @@ app.post('/marlaca/form', async (req, res) => {
         const title = ruta
             ? `WEB - ${ruta} - ${nombre}`
             : `WEB - Marlaca - ${nombre}`
-        const tags = ['WEB', 'Formulario Marlaca']
-        if (tier) tags.push(`Tier ${tier}`)
-        if (ruta) tags.push(ruta)
+        const tags = ['WEB']
         const leadId = await kommoCreateLead(cfg, { name: title, contactId, tags })
 
         // 3. Nota con respuestas del quiz + tracking
