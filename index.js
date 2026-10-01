@@ -1857,19 +1857,96 @@ app.get('/meta/webhook', (req, res) => {
     return res.sendStatus(403)
 })
 
-// Routing page_id → config de cliente. Ampliable cuando sumemos más cuentas.
+// --- Config Marlaca (routing + Kommo) -----------------------------------
+const MARLACA_KOMMO = {
+    base: 'https://marlaca.kommo.com/api/v4',
+    token: process.env.MARLACA_KOMMO_TOKEN,
+    pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14548567', 10),
+    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112390643', 10)
+}
+
 const META_PAGE_ROUTING = {
-    // page_id de Marlaca → config de Kommo Marlaca
     [process.env.MARLACA_META_PAGE_ID || '']: {
         name: 'marlaca',
-        kommoBase: 'https://marlaca.kommo.com/api/v4',
-        kommoToken: process.env.MARLACA_KOMMO_TOKEN,
-        pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14548567', 10),
-        statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112390643', 10),
+        kommo: MARLACA_KOMMO,
         tags: ['Meta Ads', 'Formulario Instantáneo']
     }
 }
 
+// --- Helpers compartidos (Meta webhook + formulario web) ----------------
+// Normaliza un número a solo dígitos para wa.me (sin +, espacios, guiones)
+function normalizeIntlPhone(raw) {
+    if (!raw) return null
+    let n = String(raw).replace(/\D/g, '')
+    if (!n) return null
+    if (n.startsWith('00')) n = n.slice(2)
+    if (n.length < 7 || n.length > 15) return null
+    return n
+}
+
+function waLink(digits) {
+    return `https://wa.me/${digits}`
+}
+
+function buildWhatsAppNote(phones) {
+    // phones: [{ label, raw }, ...]  → nota con links clickeables
+    const valid = (phones || [])
+        .map(p => ({ label: p.label, raw: p.raw, digits: normalizeIntlPhone(p.raw) }))
+        .filter(p => p.digits)
+    if (!valid.length) return null
+    const lines = ['Para hablar por WhatsApp, hacé clic en el enlace:', '--']
+    for (const p of valid) {
+        lines.push(`• ${p.label} (${p.raw}): ${waLink(p.digits)}`)
+    }
+    lines.push('--')
+    return lines.join('\n')
+}
+
+async function kommoCreateContact(cfg, { name, email, phone, phoneAlt }) {
+    const phoneValues = []
+    if (phone) phoneValues.push({ value: phone, enum_code: 'MOB' })
+    if (phoneAlt && phoneAlt !== phone) phoneValues.push({ value: phoneAlt, enum_code: 'WORK' })
+    const custom = []
+    if (phoneValues.length) custom.push({ field_code: 'PHONE', values: phoneValues })
+    if (email) custom.push({ field_code: 'EMAIL', values: [{ value: email, enum_code: 'WORK' }] })
+    const payload = [{ name: name || 'Sin nombre', custom_fields_values: custom }]
+    const r = await axios.post(`${cfg.base}/contacts`, payload, {
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+        timeout: 10000
+    })
+    return r.data._embedded.contacts[0].id
+}
+
+async function kommoCreateLead(cfg, { name, contactId, tags }) {
+    const payload = [{
+        name,
+        pipeline_id: cfg.pipelineId,
+        status_id: cfg.statusId,
+        _embedded: {
+            contacts: [{ id: contactId }],
+            tags: (tags || []).map(t => ({ name: t }))
+        }
+    }]
+    const r = await axios.post(`${cfg.base}/leads`, payload, {
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+        timeout: 10000
+    })
+    return r.data._embedded.leads[0].id
+}
+
+async function kommoAddNote(cfg, leadId, text) {
+    if (!text) return
+    await axios.post(`${cfg.base}/leads/${leadId}/notes`, [{
+        entity_id: leadId,
+        note_type: 'common',
+        params: { text }
+    }], {
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
+        timeout: 10000
+    })
+}
+
+// --- Meta Lead Ads (webhook) --------------------------------------------
 async function fetchMetaLead(leadgenId) {
     const token = process.env.META_SYSTEM_USER_TOKEN
     const version = process.env.META_GRAPH_VERSION || 'v21.0'
@@ -1879,7 +1956,7 @@ async function fetchMetaLead(leadgenId) {
     return r.data
 }
 
-function parseLeadFields(fieldData = []) {
+function parseMetaLeadFields(fieldData = []) {
     const map = {}
     for (const f of fieldData) {
         if (!f.name) continue
@@ -1889,71 +1966,60 @@ function parseLeadFields(fieldData = []) {
     const last = map.last_name || map.apellido || map.apellidos || ''
     const name = map.full_name || map.nombre_completo || [first, last].filter(Boolean).join(' ').trim() || 'Lead sin nombre'
     const email = map.email || map.correo || ''
-    const phone = map.phone_number || map.phone || map.telefono || map['teléfono'] || map.celular || ''
-    return { name, email, phone, raw: fieldData }
-}
-
-async function pushLeadToKommo(cfg, lead) {
-    const headers = { Authorization: `Bearer ${cfg.kommoToken}`, 'Content-Type': 'application/json' }
-    const parsed = parseLeadFields(lead.field_data)
-
-    // 1. Contacto
-    const contactPayload = [{
-        name: parsed.name,
-        custom_fields_values: [
-            parsed.phone ? { field_code: 'PHONE', values: [{ value: parsed.phone, enum_code: 'MOB' }] } : null,
-            parsed.email ? { field_code: 'EMAIL', values: [{ value: parsed.email, enum_code: 'WORK' }] } : null
-        ].filter(Boolean)
-    }]
-    const contactRes = await axios.post(`${cfg.kommoBase}/contacts`, contactPayload, { headers, timeout: 10000 })
-    const contactId = contactRes.data._embedded.contacts[0].id
-
-    // 2. Lead
-    const tags = [...cfg.tags]
-    if (lead.campaign_name) tags.push(lead.campaign_name)
-    const leadPayload = [{
-        name: `Meta Ad - ${parsed.name}`,
-        pipeline_id: cfg.pipelineId,
-        status_id: cfg.statusId,
-        _embedded: {
-            contacts: [{ id: contactId }],
-            tags: tags.map(t => ({ name: t }))
-        }
-    }]
-    const leadRes = await axios.post(`${cfg.kommoBase}/leads`, leadPayload, { headers, timeout: 10000 })
-    const leadId = leadRes.data._embedded.leads[0].id
-
-    // 3. Nota con detalle de respuestas + info de campaña
-    const lines = ['Lead recibido de Meta Ads (formulario instantáneo)']
-    if (lead.form_id) lines.push(`Form ID: ${lead.form_id}`)
-    if (lead.campaign_name) lines.push(`Campaña: ${lead.campaign_name}`)
-    if (lead.adset_name) lines.push(`Conjunto de anuncios: ${lead.adset_name}`)
-    if (lead.ad_name) lines.push(`Anuncio: ${lead.ad_name}`)
-    if (lead.platform) lines.push(`Plataforma: ${lead.platform}`)
-    if (lead.created_time) lines.push(`Enviado: ${lead.created_time}`)
-    lines.push('')
-    lines.push('Respuestas del formulario:')
-    for (const f of parsed.raw || []) {
-        lines.push(`- ${f.name}: ${(f.values || []).join(', ')}`)
+    const phone = map.phone_number || map.phone || ''
+    // Buscar un segundo teléfono en campos custom (keywords comunes)
+    let phoneAlt = ''
+    for (const [k, v] of Object.entries(map)) {
+        if (k === 'phone_number' || k === 'phone' || !v) continue
+        if (/tel[eé]fono|celular|whatsapp|m[oó]vil|n[uú]mero/.test(k)) { phoneAlt = v; break }
     }
-    await axios.post(`${cfg.kommoBase}/leads/${leadId}/notes`, [{
-        entity_id: leadId,
-        note_type: 'common',
-        params: { text: lines.join('\n') }
-    }], { headers, timeout: 10000 })
-
-    return { contactId, leadId }
+    return { name, email, phone, phoneAlt, raw: fieldData }
 }
 
 async function processLeadgen(leadgenId, pageId) {
-    const cfg = META_PAGE_ROUTING[pageId]
-    if (!cfg) {
+    const route = META_PAGE_ROUTING[pageId]
+    if (!route) {
         console.warn(`Meta webhook - page_id ${pageId} sin ruteo configurado, se descarta`)
         return
     }
     const lead = await fetchMetaLead(leadgenId)
-    const result = await pushLeadToKommo(cfg, lead)
-    console.log(`Meta webhook - lead procesado (${cfg.name}): contact=${result.contactId} lead=${result.leadId}`)
+    const parsed = parseMetaLeadFields(lead.field_data)
+    const cfg = route.kommo
+
+    const contactId = await kommoCreateContact(cfg, {
+        name: parsed.name, email: parsed.email, phone: parsed.phone, phoneAlt: parsed.phoneAlt
+    })
+
+    const tags = [...route.tags]
+    if (lead.campaign_name) tags.push(lead.campaign_name)
+    const leadId = await kommoCreateLead(cfg, {
+        name: `Meta Ad - ${parsed.name}`,
+        contactId,
+        tags
+    })
+
+    // Nota 1: respuestas + campaña
+    const l1 = ['Lead recibido de Meta Ads (formulario instantáneo)']
+    if (lead.form_id) l1.push(`Form ID: ${lead.form_id}`)
+    if (lead.campaign_name) l1.push(`Campaña: ${lead.campaign_name}`)
+    if (lead.adset_name) l1.push(`Conjunto de anuncios: ${lead.adset_name}`)
+    if (lead.ad_name) l1.push(`Anuncio: ${lead.ad_name}`)
+    if (lead.platform) l1.push(`Plataforma: ${lead.platform}`)
+    if (lead.created_time) l1.push(`Enviado: ${lead.created_time}`)
+    l1.push('', 'Respuestas del formulario:')
+    for (const f of parsed.raw || []) {
+        l1.push(`- ${f.name}: ${(f.values || []).join(', ')}`)
+    }
+    await kommoAddNote(cfg, leadId, l1.join('\n'))
+
+    // Nota 2: links WhatsApp (si hay teléfono)
+    const waNote = buildWhatsAppNote([
+        { label: 'Teléfono', raw: parsed.phone },
+        { label: 'Teléfono del formulario', raw: parsed.phoneAlt }
+    ])
+    if (waNote) await kommoAddNote(cfg, leadId, waNote)
+
+    console.log(`Meta webhook - lead procesado (${route.name}): contact=${contactId} lead=${leadId}`)
 }
 
 // POST: recibe eventos leadgen. Valida HMAC → responde 200 inmediato → procesa async.
@@ -1983,6 +2049,84 @@ app.post('/meta/webhook', (req, res) => {
 })
 
 
+// =====================================================
+// MARLACA: Formulario web (landing agendar/) → Kommo
+// =====================================================
+// Body esperado:
+// {
+//   nombre, email, prefijo (ej "+34"), telefono,
+//   opcion?, presupuesto?, horizonte?,            // respuestas del quiz
+//   q?: { label: value, ... },                    // respuestas extra (opcional)
+//   tracking?: { utm_source, utm_medium, ... },   // UTMs + referer
+//   calificacion?, puntaje?, ruta?, alerta?       // scoring del quiz
+// }
+app.post('/marlaca/form', async (req, res) => {
+    try {
+        const b = req.body || {}
+        const nombre = (b.nombre || '').toString().trim()
+        const email = (b.email || '').toString().trim()
+        const prefijo = (b.prefijo || '').toString().trim()
+        const telefono = (b.telefono || '').toString().trim()
+        if (!nombre || !email) {
+            return res.status(400).json({ success: false, mensaje: 'nombre y email son obligatorios' })
+        }
+        const phoneRaw = prefijo && telefono ? `${prefijo} ${telefono}` : (telefono || '')
+        const cfg = MARLACA_KOMMO
+
+        // 1. Contacto
+        const contactId = await kommoCreateContact(cfg, { name: nombre, email, phone: phoneRaw })
+
+        // 2. Lead
+        const ruta = (b.ruta || '').toString().trim()
+        const tier = (b.calificacion || '').toString().trim()
+        const title = ruta
+            ? `WEB - ${ruta} - ${nombre}`
+            : `WEB - Marlaca - ${nombre}`
+        const tags = ['WEB', 'Formulario Marlaca']
+        if (tier) tags.push(`Tier ${tier}`)
+        if (ruta) tags.push(ruta)
+        const leadId = await kommoCreateLead(cfg, { name: title, contactId, tags })
+
+        // 3. Nota con respuestas del quiz + tracking
+        const lines = ['Lead recibido del formulario web (agendar/)']
+        if (tier || b.puntaje) lines.push(`Scoring: ${tier || '-'} · ${b.puntaje || '-'}`)
+        if (ruta) lines.push(`Ruta: ${ruta}`)
+        if (b.alerta) lines.push(`Alerta: ${b.alerta}`)
+        lines.push('')
+        lines.push('Respuestas del formulario:')
+        if (b.opcion) lines.push(`- Opción: ${b.opcion}`)
+        if (b.presupuesto) lines.push(`- Presupuesto: ${b.presupuesto}`)
+        if (b.horizonte) lines.push(`- Horizonte: ${b.horizonte}`)
+        if (b.q && typeof b.q === 'object') {
+            for (const [k, v] of Object.entries(b.q)) {
+                if (v !== undefined && v !== null && v !== '') lines.push(`- ${k}: ${v}`)
+            }
+        }
+        if (b.tracking && typeof b.tracking === 'object') {
+            lines.push('', 'Tracking:')
+            for (const [k, v] of Object.entries(b.tracking)) {
+                if (v !== undefined && v !== null && v !== '') lines.push(`${k}: ${v}`)
+            }
+        }
+        await kommoAddNote(cfg, leadId, lines.join('\n'))
+
+        // 4. Nota WhatsApp (si hay teléfono)
+        const waNote = buildWhatsAppNote([{ label: 'Teléfono', raw: phoneRaw }])
+        if (waNote) await kommoAddNote(cfg, leadId, waNote)
+
+        console.log(`Marlaca form - contact=${contactId} lead=${leadId}`)
+        res.json({ success: true, contact_id: contactId, lead_id: leadId })
+    } catch (error) {
+        console.error('Marlaca form - error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al procesar el formulario',
+            detalles: error.response?.data || error.message
+        })
+    }
+})
+
+
 // Iniciar servidor
 app.listen(PORT, () => {
     startCron()
@@ -1999,7 +2143,8 @@ app.listen(PORT, () => {
     console.log('  POST /talent/step4 - Subir CV')
     console.log('\nEndpoints Marlaca:')
     console.log('  POST /marlaca/capi - Meta Conversions API (server-side pixel)')
+    console.log('  POST /marlaca/form - Formulario web → Kommo (contacto + lead + notas)')
     console.log('\nEndpoints Meta Webhook:')
     console.log('  GET  /meta/webhook - handshake de verificación con Meta')
-    console.log('  POST /meta/webhook - recepción de eventos leadgen')
+    console.log('  POST /meta/webhook - recepción de eventos leadgen → Kommo')
 })
