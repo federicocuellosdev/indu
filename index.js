@@ -58,7 +58,9 @@ app.use(cors({
     },
     credentials: true
 }))
-app.use(express.json())
+app.use(express.json({
+    verify: (req, _res, buf) => { req.rawBody = buf }
+}))
 
 // Ruta test
 app.get('/', (req, res) => {
@@ -1855,12 +1857,107 @@ app.get('/meta/webhook', (req, res) => {
     return res.sendStatus(403)
 })
 
-// POST: recibe eventos de leadgen. Validación HMAC + enqueue para procesar.
-// Nota: el procesamiento del lead (fetch Graph API + alta en Kommo) se agrega
-// cuando tengamos el token con permisos leads_retrieval y el App Secret.
-app.post('/meta/webhook', express.json({
-    verify: (req, _res, buf) => { req.rawBody = buf }
-}), (req, res) => {
+// Routing page_id → config de cliente. Ampliable cuando sumemos más cuentas.
+const META_PAGE_ROUTING = {
+    // page_id de Marlaca → config de Kommo Marlaca
+    [process.env.MARLACA_META_PAGE_ID || '']: {
+        name: 'marlaca',
+        kommoBase: 'https://marlaca.kommo.com/api/v4',
+        kommoToken: process.env.MARLACA_KOMMO_TOKEN,
+        pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14548567', 10),
+        statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112390643', 10),
+        tags: ['Meta Ads', 'Formulario Instantáneo']
+    }
+}
+
+async function fetchMetaLead(leadgenId) {
+    const token = process.env.META_SYSTEM_USER_TOKEN
+    const version = process.env.META_GRAPH_VERSION || 'v21.0'
+    if (!token) throw new Error('META_SYSTEM_USER_TOKEN no configurado')
+    const url = `https://graph.facebook.com/${version}/${leadgenId}?fields=field_data,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,platform,created_time,form_id&access_token=${token}`
+    const r = await axios.get(url, { timeout: 10000 })
+    return r.data
+}
+
+function parseLeadFields(fieldData = []) {
+    const map = {}
+    for (const f of fieldData) {
+        if (!f.name) continue
+        map[f.name.toLowerCase()] = (f.values && f.values[0]) || ''
+    }
+    const first = map.first_name || map.nombre || ''
+    const last = map.last_name || map.apellido || map.apellidos || ''
+    const name = map.full_name || map.nombre_completo || [first, last].filter(Boolean).join(' ').trim() || 'Lead sin nombre'
+    const email = map.email || map.correo || ''
+    const phone = map.phone_number || map.phone || map.telefono || map['teléfono'] || map.celular || ''
+    return { name, email, phone, raw: fieldData }
+}
+
+async function pushLeadToKommo(cfg, lead) {
+    const headers = { Authorization: `Bearer ${cfg.kommoToken}`, 'Content-Type': 'application/json' }
+    const parsed = parseLeadFields(lead.field_data)
+
+    // 1. Contacto
+    const contactPayload = [{
+        name: parsed.name,
+        custom_fields_values: [
+            parsed.phone ? { field_code: 'PHONE', values: [{ value: parsed.phone, enum_code: 'MOB' }] } : null,
+            parsed.email ? { field_code: 'EMAIL', values: [{ value: parsed.email, enum_code: 'WORK' }] } : null
+        ].filter(Boolean)
+    }]
+    const contactRes = await axios.post(`${cfg.kommoBase}/contacts`, contactPayload, { headers, timeout: 10000 })
+    const contactId = contactRes.data._embedded.contacts[0].id
+
+    // 2. Lead
+    const tags = [...cfg.tags]
+    if (lead.campaign_name) tags.push(lead.campaign_name)
+    const leadPayload = [{
+        name: `Meta Ad - ${parsed.name}`,
+        pipeline_id: cfg.pipelineId,
+        status_id: cfg.statusId,
+        _embedded: {
+            contacts: [{ id: contactId }],
+            tags: tags.map(t => ({ name: t }))
+        }
+    }]
+    const leadRes = await axios.post(`${cfg.kommoBase}/leads`, leadPayload, { headers, timeout: 10000 })
+    const leadId = leadRes.data._embedded.leads[0].id
+
+    // 3. Nota con detalle de respuestas + info de campaña
+    const lines = ['Lead recibido de Meta Ads (formulario instantáneo)']
+    if (lead.form_id) lines.push(`Form ID: ${lead.form_id}`)
+    if (lead.campaign_name) lines.push(`Campaña: ${lead.campaign_name}`)
+    if (lead.adset_name) lines.push(`Conjunto de anuncios: ${lead.adset_name}`)
+    if (lead.ad_name) lines.push(`Anuncio: ${lead.ad_name}`)
+    if (lead.platform) lines.push(`Plataforma: ${lead.platform}`)
+    if (lead.created_time) lines.push(`Enviado: ${lead.created_time}`)
+    lines.push('')
+    lines.push('Respuestas del formulario:')
+    for (const f of parsed.raw || []) {
+        lines.push(`- ${f.name}: ${(f.values || []).join(', ')}`)
+    }
+    await axios.post(`${cfg.kommoBase}/leads/${leadId}/notes`, [{
+        entity_id: leadId,
+        note_type: 'common',
+        params: { text: lines.join('\n') }
+    }], { headers, timeout: 10000 })
+
+    return { contactId, leadId }
+}
+
+async function processLeadgen(leadgenId, pageId) {
+    const cfg = META_PAGE_ROUTING[pageId]
+    if (!cfg) {
+        console.warn(`Meta webhook - page_id ${pageId} sin ruteo configurado, se descarta`)
+        return
+    }
+    const lead = await fetchMetaLead(leadgenId)
+    const result = await pushLeadToKommo(cfg, lead)
+    console.log(`Meta webhook - lead procesado (${cfg.name}): contact=${result.contactId} lead=${result.leadId}`)
+}
+
+// POST: recibe eventos leadgen. Valida HMAC → responde 200 inmediato → procesa async.
+app.post('/meta/webhook', (req, res) => {
     const appSecret = process.env.META_APP_SECRET
     const sig = req.headers['x-hub-signature-256']
     if (appSecret && sig && req.rawBody) {
@@ -1870,9 +1967,19 @@ app.post('/meta/webhook', express.json({
             return res.sendStatus(403)
         }
     }
-    console.log('Meta webhook - payload recibido:', JSON.stringify(req.body))
-    // TODO: enrutar por page_id → fetch /{leadgen_id} → crear contacto+lead en Kommo
     res.sendStatus(200)
+
+    const body = req.body || {}
+    for (const entry of body.entry || []) {
+        for (const change of entry.changes || []) {
+            if (change.field !== 'leadgen') continue
+            const v = change.value || {}
+            if (!v.leadgen_id) continue
+            processLeadgen(v.leadgen_id, String(entry.id || v.page_id || '')).catch(err => {
+                console.error('Meta webhook - error procesando leadgen:', err.response?.data || err.message)
+            })
+        }
+    }
 })
 
 
