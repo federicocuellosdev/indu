@@ -1862,7 +1862,7 @@ const MARLACA_KOMMO = {
     base: 'https://marlaca.kommo.com/api/v4',
     token: process.env.MARLACA_KOMMO_TOKEN,
     pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14548567', 10),
-    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112390643', 10)
+    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112390647', 10)
 }
 
 const META_PAGE_ROUTING = {
