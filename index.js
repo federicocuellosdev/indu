@@ -212,9 +212,6 @@ app.post('/api/kommo-contacto', async (req, res) => {
 app.post('/preston', async (req, res) => {
     const kommo_preston_subdominio = process.env.KOMMO_PRESTON_SUBDOMINIO
     const kommo_preston_token = process.env.KOMMO_PRESTON_TOKEN
-    const kommo_preston_pipeline_id = 8704063        // Pipeline "Embudo de ventas"
-
-    const kommo_preston_pipeline_etapa_id = 68359371  // Etapa "INGRESO"
 
     try {
         const { nombre, apellido, nombre_completo: nc, email, telefono, categoria, dni } = req.body
@@ -283,139 +280,221 @@ app.post('/preston', async (req, res) => {
             return telMatch || dniMatch
         })
 
+        // 1. Crear o reutilizar contacto (NO más skip silencioso)
+        let contacto_id
         if (duplicado) {
-            console.log(`Kommo - Duplicado detectado, contacto existente: ${duplicado.id}. Skip silencioso.`)
-            return res.json({
-                success: true,
-                mensaje: 'Solicitud procesada correctamente'
-            })
+            contacto_id = duplicado.id
+            console.log(`Preston - Contacto duplicado, reutilizando: ${contacto_id}`)
+        } else {
+            const contacto_data = {
+                name: nombre_completo,
+                first_name: first_name,
+                last_name: last_name,
+                custom_fields_values: [
+                    { field_code: 'PHONE', values: [{ enum_code: 'WORK', value: telefono_normalizado }] },
+                    { field_id: 1986017, values: [{ value: first_name }] }
+                ]
+            }
+            if (email) {
+                contacto_data.custom_fields_values.push({
+                    field_code: 'EMAIL', values: [{ enum_code: 'WORK', value: email }]
+                })
+            }
+            if (dni_normalizado) {
+                contacto_data.custom_fields_values.push({
+                    field_id: 1986662, values: [{ value: dni_normalizado }]
+                })
+            }
+            const cr = await kommo_api.post('/contacts', [contacto_data])
+            contacto_id = cr.data._embedded.contacts[0].id
+            console.log('Preston - Contacto creado:', contacto_id)
         }
 
-        // 1. Crear Contacto
-        const contacto_data = {
-            name: nombre_completo,
-            first_name: first_name,
-            last_name: last_name,
-            custom_fields_values: [
-                {
-                    field_code: 'PHONE',
-                    values: [{
-                        enum_code: 'WORK',
-                        value: telefono_normalizado
-                    }]
-                },
-                {
-                    field_id: 1986017,
-                    values: [{ value: first_name }]
-                }
-            ]
-        }
-
-        if (email) {
-            contacto_data.custom_fields_values.push({
-                field_code: 'EMAIL',
-                values: [{
-                    enum_code: 'WORK',
-                    value: email
-                }]
-            });
-        }
-
-        if (dni_normalizado) {
-            contacto_data.custom_fields_values.push({
-                field_id: 1986662,
-                values: [{
-                    value: dni_normalizado
-                }]
-            });
-        }
-
-        const contacto_respuesta = await kommo_api.post('/contacts', [contacto_data])
-        const contacto_id = contacto_respuesta.data._embedded.contacts[0].id
-        console.log('Kommo - Contacto Preston:', contacto_id)
-
-        // 2. Obtener o crear etiqueta
-        let tag_id = null;
+        // 2. Obtener o crear etiqueta de categoría
+        let tag_id = null
         if (categoria && categoria.trim() !== '') {
             try {
-                // Buscar la etiqueta en el pipeline de leads
-                const tags_response = await kommo_api.get('/leads/tags');
-
+                const tags_response = await kommo_api.get('/leads/tags')
                 const existing_tag = tags_response.data?._embedded?.tags?.find(
                     tag => tag.name.toLowerCase() === categoria.toLowerCase()
-                );
-
+                )
                 if (existing_tag) {
-                    tag_id = existing_tag.id;
-                    console.log(`Kommo - Etiqueta existente encontrada: ${categoria} (ID: ${tag_id})`);
+                    tag_id = existing_tag.id
                 } else {
-                    // Crear la etiqueta si no existe
-                    const new_tag_response = await kommo_api.post('/leads/tags', [{ name: categoria }]);
-                    tag_id = new_tag_response.data._embedded.tags[0].id;
-                    console.log(`Kommo - Nueva etiqueta creada: ${categoria} (ID: ${tag_id})`);
+                    const new_tag_response = await kommo_api.post('/leads/tags', [{ name: categoria }])
+                    tag_id = new_tag_response.data._embedded.tags[0].id
                 }
             } catch (tagError) {
-                console.error('Kommo - Error al gestionar etiqueta:', tagError.response?.data || tagError.message);
-                // Continuar sin etiqueta si hay error
+                console.error('Preston - Error al gestionar etiqueta:', tagError.response?.data || tagError.message)
+            }
+        }
+        const tags = tag_id ? [{ id: tag_id }] : (categoria ? [{ name: categoria }] : [])
+
+        // 3. Buscar lead del contacto en pipelines aceptados (v2 onboarding + v1 legacy):
+        //    - ACTIVO (status ≠ 142 Ganados y ≠ 143 Perdidos): se reutiliza con intento++
+        //    - PERDIDO (status 143): no se crea uno nuevo, solo se agrega una nota
+        //    - GANADO (142) o sin lead: se crea uno nuevo
+        let lead_existente = null
+        let lead_perdido = null
+        try {
+            const cr = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
+            const leadIds = (cr.data?._embedded?.leads || []).map(l => l.id)
+            if (leadIds.length > 0) {
+                const idsQS = leadIds.map(id => `filter[id][]=${id}`).join('&')
+                const lr = await kommo_api.get(`/leads?${idsQS}&limit=250`)
+                const leads = lr.data?._embedded?.leads || []
+                lead_existente =
+                    leads.find(l => l.pipeline_id === PRESTON_V2_PIPELINE_ID && l.status_id !== 142 && l.status_id !== 143) ||
+                    leads.find(l => l.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID && l.status_id !== 142 && l.status_id !== 143) ||
+                    null
+                if (lead_existente) {
+                    console.log(`Preston - Lead existente: ${lead_existente.id} (pipeline ${lead_existente.pipeline_id}, status ${lead_existente.status_id}). Reutilizando.`)
+                } else {
+                    lead_perdido =
+                        leads.find(l => l.pipeline_id === PRESTON_V2_PIPELINE_ID && l.status_id === 143) ||
+                        leads.find(l => l.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID && l.status_id === 143) ||
+                        null
+                    if (lead_perdido) {
+                        console.log(`Preston - Lead Perdido encontrado: ${lead_perdido.id}. Solo se agregará nota, no se crea uno nuevo.`)
+                    }
+                }
+            }
+        } catch (e) {
+            if (e.response?.status !== 204) {
+                console.error('Preston - Error buscando leads existentes:', e.response?.data || e.message)
             }
         }
 
-        // 3. Crear Lead
-        const lead_data = {
-            name: `${nombre_completo} - onboarding`,
-            pipeline_id: kommo_preston_pipeline_id,
-            status_id: kommo_preston_pipeline_etapa_id,
-            _embedded: {
-                contacts: [{ id: contacto_id }],
-                tags: tag_id ? [{ id: tag_id }] : (categoria ? [{ name: categoria }] : [])
+        // 4. Reutilizar lead activo / notar lead Perdido / crear uno nuevo
+        let lead_id
+        let lead_reutilizado = false
+        let lead_transferido = false
+        let lead_solo_nota = false
+        let intento_actual = 0
+        if (lead_existente) {
+            lead_id = lead_existente.id
+            lead_reutilizado = true
+
+            const intento_field = (lead_existente.custom_fields_values || [])
+                .find(f => f.field_id === PRESTON_V2_LEAD_INTENTO_FIELD_ID)
+            const intento_leido = parseInt(intento_field?.values?.[0]?.value || 0, 10) || 0
+            intento_actual = Math.max(intento_leido, 1)
+            const nuevo_intento = intento_actual + 1
+
+            const update = {
+                name: `${nombre_completo} - onboarding`,
+                custom_fields_values: [
+                    { field_id: PRESTON_V2_LEAD_TELEFONO_FIELD_ID, values: [{ value: telefono_normalizado }] },
+                    { field_id: PRESTON_V2_LEAD_INTENTO_FIELD_ID, values: [{ value: nuevo_intento }] }
+                ],
+                _embedded: { tags }
             }
+            // Si el lead vivía en el pipeline legacy, se transfiere al pipeline v2 onboarding
+            if (lead_existente.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID) {
+                update.pipeline_id = PRESTON_V2_PIPELINE_ID
+                update.status_id = PRESTON_V2_ETAPA_INCOMPLETO
+                lead_transferido = true
+            }
+            try {
+                await kommo_api.patch(`/leads/${lead_id}`, update)
+                console.log(`Preston - Lead ${lead_id} actualizado (intento ${nuevo_intento}${lead_transferido ? ', transferido de legacy' : ''})`)
+            } catch (updErr) {
+                console.error('Preston - Error actualizando lead reutilizado:', updErr.response?.data || updErr.message)
+            }
+
+            const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })
+            const nota_txt = `🔁 Nuevo intento #${nuevo_intento} — ${fecha}` +
+                (lead_transferido ? '\nLead transferido desde "En desuso: Embudo de ventas" al Embudo leads onboarding.' : '')
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: nota_txt }
+                }])
+            } catch (noteErr) {
+                console.error('Preston - Error creando nota de intento:', noteErr.response?.data || noteErr.message)
+            }
+        } else if (lead_perdido) {
+            // Lead Perdido: solo agrega nota, no reactiva ni crea nuevo
+            lead_id = lead_perdido.id
+            lead_solo_nota = true
+            const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: `🔁 El contacto volvió a completar el onboarding — ${fecha}\n(Lead en estado Perdido: no se reactivó ni se creó uno nuevo)` }
+                }])
+            } catch (noteErr) {
+                console.error('Preston - Error creando nota en lead Perdido:', noteErr.response?.data || noteErr.message)
+            }
+        } else {
+            // Crea lead nuevo en el pipeline v2 onboarding (el legacy 8704063 ya está en desuso)
+            const lead_data = {
+                name: `${nombre_completo} - onboarding`,
+                pipeline_id: PRESTON_V2_PIPELINE_ID,
+                status_id: PRESTON_V2_ETAPA_INCOMPLETO,
+                custom_fields_values: [
+                    { field_id: PRESTON_V2_LEAD_TELEFONO_FIELD_ID, values: [{ value: telefono_normalizado }] },
+                    { field_id: PRESTON_V2_LEAD_INTENTO_FIELD_ID, values: [{ value: 1 }] }
+                ],
+                _embedded: {
+                    contacts: [{ id: contacto_id }],
+                    tags
+                }
+            }
+            const lead_respuesta = await kommo_api.post('/leads', [lead_data])
+            lead_id = lead_respuesta.data._embedded.leads[0].id
+            console.log('Preston - Lead creado (intento=1):', lead_id)
         }
 
-        const lead_respuesta = await kommo_api.post('/leads', [lead_data])
-        const lead_id = lead_respuesta.data._embedded.leads[0].id
-        console.log('Kommo - Lead Preston:', lead_id)
-
-        // Agregar etiqueta al lead
+        // 5. Agregar etiqueta al contacto (si existe)
         if (tag_id) {
             try {
-                const lead_tag_data = {
-                    _embedded: {
-                        tags: [{
-                            id: tag_id
-                        }]
-                    }
-                };
-                await kommo_api.patch(`/leads/${lead_id}`, lead_tag_data);
-                console.log(`Kommo - Etiqueta '${categoria}' agregada al Lead ${lead_id}`);
-            } catch (leadTagError) {
-                console.error('Kommo - Error al agregar etiqueta al lead:', leadTagError.response?.data || leadTagError.message);
-            }
-        }
-
-        // 4. Agregar etiqueta al contacto (si existe y no se agregó antes)
-        if (tag_id) {
-            try {
-                const contact_tag_data = {
-                    _embedded: {
-                        tags: [{
-                            id: tag_id
-                        }]
-                    }
-                };
-                await kommo_api.patch(`/contacts/${contacto_id}`, contact_tag_data);
-                console.log(`Kommo - Etiqueta '${categoria}' agregada al Contacto ${contacto_id}`);
+                await kommo_api.patch(`/contacts/${contacto_id}`, {
+                    _embedded: { tags: [{ id: tag_id }] }
+                })
             } catch (contactTagError) {
-                console.error('Kommo - Error al agregar etiqueta al contacto:', contactTagError.response?.data || contactTagError.message);
+                console.error('Preston - Error al agregar etiqueta al contacto:', contactTagError.response?.data || contactTagError.message)
             }
+        }
+
+        // 6. Meta CAPI: Lead server-side con event_id compartido para dedup con el pixel browser.
+        const event_id = `preston_lead_${lead_id}_${Date.now()}`
+        try {
+            await sendPrestonLeadCapi(buildPrestonCapiCtx(req, {
+                event_id,
+                nombre: first_name,
+                apellido: last_name,
+                telefono: telefono_normalizado,
+                dni: dni_normalizado,
+                email,
+                categoria,
+                lead_id
+            }))
+        } catch (e) {
+            console.error('Preston - CAPI call failed:', e?.message || e)
         }
 
         res.json({
             success: true,
-            mensaje: 'Contacto y Lead creados con éxito en Kommo CRM (Preston)',
+            lead_id,
+            contacto_id,
+            lead_reutilizado,
+            lead_transferido,
+            lead_solo_nota,
+            intento: lead_reutilizado ? intento_actual + 1 : 1,
+            event_id,
+            mensaje: lead_solo_nota
+                ? 'Lead en estado Perdido: se agregó solo una nota (Preston)'
+                : (lead_reutilizado
+                    ? (lead_transferido
+                        ? 'Lead reutilizado y transferido de "En desuso" a Embudo onboarding (Preston)'
+                        : 'Contacto y Lead ya existían, reutilizados (Preston)')
+                    : 'Contacto y Lead creados en Kommo (Preston)'),
             datos: {
                 contacto_id,
                 lead_id,
-                tag_id
+                tag_id,
+                event_id
             }
         })
 
@@ -563,8 +642,12 @@ async function handlePrestonV2Yafue(req, res, datos) {
         if (tag_motivo_id) tags.push({ id: tag_motivo_id })
         else if (motivo_yafue) tags.push({ name: motivo_yafue })
 
-        // 3. Buscar lead activo del contacto en el pipeline YAFUE
+        // 3. Buscar lead del contacto en el pipeline YAFUE:
+        //    - ACTIVO (≠ 142 Ganados y ≠ 143 Perdidos): se reutiliza con intento++
+        //    - PERDIDO (143): solo se agrega una nota, no se crea uno nuevo
+        //    - GANADO (142) o sin lead: cae al else y crea uno nuevo
         let lead_existente = null
+        let lead_perdido = null
         try {
             const cr2 = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
             const leadIds = (cr2.data?._embedded?.leads || []).map(l => l.id)
@@ -576,11 +659,17 @@ async function handlePrestonV2Yafue(req, res, datos) {
                     l.pipeline_id === YAFUE_PIPELINE_ID &&
                     l.status_id !== 142 && l.status_id !== 143
                 ) || null
+                if (!lead_existente) {
+                    lead_perdido = leads.find(l =>
+                        l.pipeline_id === YAFUE_PIPELINE_ID && l.status_id === 143
+                    ) || null
+                }
             }
         } catch (e) { /* seguimos y creamos */ }
 
         let lead_id
         let lead_reutilizado = false
+        let lead_solo_nota = false
         let intento_actual = 0
         if (lead_existente) {
             lead_id = lead_existente.id
@@ -616,6 +705,17 @@ async function handlePrestonV2Yafue(req, res, datos) {
                     params: { text: `🔁 Nuevo intento #${nuevo_intento} — ${fecha}` }
                 }])
             } catch (e) { /* soft-fail */ }
+        } else if (lead_perdido) {
+            // Lead Perdido: solo nota, no se reactiva ni se crea uno nuevo
+            lead_id = lead_perdido.id
+            lead_solo_nota = true
+            const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: `🔁 El contacto volvió a completar el onboarding — ${fecha}\n(Lead YAFUE en estado Perdido: no se reactivó ni se creó uno nuevo)` }
+                }])
+            } catch (e) { /* soft-fail */ }
         } else {
             // Crear lead nuevo con intento=1
             const lead_data = {
@@ -648,16 +748,38 @@ async function handlePrestonV2Yafue(req, res, datos) {
             }])
         } catch (e) { /* soft-fail */ }
 
+        // Meta CAPI: Lead server-side con event_id compartido para dedup con el pixel browser.
+        // Mismo píxel de Preston (no YAFUE): el usuario sigue en el sitio preston.com.ar y es
+        // ahí donde se contabiliza la conversión publicitaria.
+        const event_id = `preston_lead_${lead_id}_${Date.now()}`
+        try {
+            await sendPrestonLeadCapi(buildPrestonCapiCtx(req, {
+                event_id,
+                nombre, apellido,
+                telefono: telefono_normalizado,
+                dni: dni_normalizado,
+                email,
+                categoria: 'YAFUE',
+                lead_id
+            }))
+        } catch (e) {
+            console.error('Preston v2 → YAFUE - CAPI call failed:', e?.message || e)
+        }
+
         return res.json({
             success: true,
             destino: 'yafue',
             lead_id,
             contacto_id,
             lead_reutilizado,
+            lead_solo_nota,
             intento: lead_reutilizado ? intento_actual + 1 : 1,
-            mensaje: lead_reutilizado
-                ? 'Contacto y Lead ya existían en YAFUE, reutilizados'
-                : 'Contacto y Lead creados en YAFUE'
+            event_id,
+            mensaje: lead_solo_nota
+                ? 'Lead YAFUE en estado Perdido: se agregó solo una nota'
+                : (lead_reutilizado
+                    ? 'Contacto y Lead ya existían en YAFUE, reutilizados'
+                    : 'Contacto y Lead creados en YAFUE')
         })
     } catch (error) {
         console.error('Preston v2 → YAFUE - Error:', error.response?.data || error.message)
@@ -791,14 +913,17 @@ app.post('/preston-v2', async (req, res) => {
         const tag_cat_id = await getOrCreateTag(categoria)
         const tag_sub_id = await getOrCreateTag(sub_categoria)
 
-        // 3. Verificar si el contacto ya tiene un lead ACTIVO en los pipelines
-        //    aceptados: el nuevo (onboarding) y el viejo (v1 legacy en desuso).
-        //    "Activo" = no está en 142 (Ganados) ni en 143 (Perdidos).
+        // 3. Verificar si el contacto ya tiene un lead en los pipelines aceptados:
+        //    el nuevo (onboarding) y el viejo (v1 legacy en desuso).
+        //    - ACTIVO (status ≠ 142 Ganados y ≠ 143 Perdidos): se reutiliza con intento++
+        //    - PERDIDO (status 143): no se crea ninguno nuevo, solo se agrega una nota
+        //    - GANADO (status 142) o sin lead: cae al else y crea uno nuevo
         //    NOTA: `filter[contacts][]` en /leads no filtra realmente por contacto
         //    (Kommo lo ignora). Vamos por /contacts/{id}?with=leads para obtener
         //    los IDs vinculados y después traemos esos leads.
         const PIPELINES_ACEPTADOS = [PRESTON_V2_PIPELINE_ID, PRESTON_V1_LEGACY_PIPELINE_ID]
         let lead_existente = null
+        let lead_perdido = null
         try {
             const cr = await kommo_api.get(`/contacts/${contacto_id}?with=leads`)
             const leadIds = (cr.data?._embedded?.leads || []).map(l => l.id)
@@ -806,13 +931,22 @@ app.post('/preston-v2', async (req, res) => {
                 const idsQS = leadIds.map(id => `filter[id][]=${id}`).join('&')
                 const lr = await kommo_api.get(`/leads?${idsQS}&limit=250`)
                 const leads = lr.data?._embedded?.leads || []
-                // Prioridad: el pipeline onboarding gana sobre el legacy si hay leads en ambos
+                // 1) Activo (prioridad: pipeline onboarding sobre legacy)
                 lead_existente =
                     leads.find(l => l.pipeline_id === PRESTON_V2_PIPELINE_ID && l.status_id !== 142 && l.status_id !== 143) ||
                     leads.find(l => l.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID && l.status_id !== 142 && l.status_id !== 143) ||
                     null
                 if (lead_existente) {
                     console.log(`Preston v2 - Lead existente: ${lead_existente.id} (pipeline ${lead_existente.pipeline_id}, status ${lead_existente.status_id}). Reutilizando.`)
+                } else {
+                    // 2) Perdido (143): solo se agregará una nota, no se crea lead nuevo
+                    lead_perdido =
+                        leads.find(l => l.pipeline_id === PRESTON_V2_PIPELINE_ID && l.status_id === 143) ||
+                        leads.find(l => l.pipeline_id === PRESTON_V1_LEGACY_PIPELINE_ID && l.status_id === 143) ||
+                        null
+                    if (lead_perdido) {
+                        console.log(`Preston v2 - Lead Perdido encontrado: ${lead_perdido.id}. Solo se agregará nota, no se crea uno nuevo.`)
+                    }
                 }
             }
         } catch (e) {
@@ -831,6 +965,7 @@ app.post('/preston-v2', async (req, res) => {
         let lead_id
         let lead_reutilizado = false
         let lead_transferido = false
+        let lead_solo_nota = false  // true cuando el lead ya existente está Perdido
         let intento_actual = 0
         if (lead_existente) {
             lead_id = lead_existente.id
@@ -880,6 +1015,20 @@ app.post('/preston-v2', async (req, res) => {
             } catch (noteErr) {
                 console.error('Preston v2 - Error creando nota de intento:', noteErr.response?.data || noteErr.message)
             }
+        } else if (lead_perdido) {
+            // Lead Perdido: NO se crea uno nuevo, NO se reactiva, NO se toca etapa ni intento.
+            // Solo se adjunta una nota al lead Perdido para dejar registro del reintento.
+            lead_id = lead_perdido.id
+            lead_solo_nota = true
+            const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })
+            try {
+                await kommo_api.post(`/leads/${lead_id}/notes`, [{
+                    note_type: 'common',
+                    params: { text: `🔁 El contacto volvió a completar el onboarding — ${fecha}\n(Lead en estado Perdido: no se reactivó ni se creó uno nuevo)` }
+                }])
+            } catch (noteErr) {
+                console.error('Preston v2 - Error creando nota en lead Perdido:', noteErr.response?.data || noteErr.message)
+            }
         } else {
             // 3b. Crear lead nuevo con nombre "{nombre_completo} - onboarding v2" e intento=1
             const lead_data = {
@@ -921,18 +1070,38 @@ app.post('/preston-v2', async (req, res) => {
             }
         }
 
+        // 5. Meta CAPI: dispara Lead server-side con event_id compartido para dedup con el pixel browser.
+        const event_id = `preston_lead_${lead_id}_${Date.now()}`
+        try {
+            await sendPrestonLeadCapi(buildPrestonCapiCtx(req, {
+                event_id,
+                nombre, apellido,
+                telefono: telefono_normalizado,
+                dni: dni_normalizado,
+                email,
+                categoria,
+                lead_id
+            }))
+        } catch (e) {
+            console.error('Preston v2 - CAPI call failed:', e?.message || e)
+        }
+
         res.json({
             success: true,
             lead_id,
             contacto_id,
             lead_reutilizado,
             lead_transferido,
+            lead_solo_nota,
             intento: lead_reutilizado ? intento_actual + 1 : 1,
-            mensaje: lead_reutilizado
-                ? (lead_transferido
-                    ? 'Lead reutilizado y transferido de "En desuso" a Embudo onboarding (Preston v2)'
-                    : 'Contacto y Lead ya existían, reutilizados (Preston v2)')
-                : 'Contacto y Lead creados en Kommo (Preston v2)'
+            event_id, // ← el frontend debe usarlo en fbq('track','Lead',params,{eventID:event_id}) para dedup
+            mensaje: lead_solo_nota
+                ? 'Lead en estado Perdido: se agregó solo una nota (Preston v2)'
+                : (lead_reutilizado
+                    ? (lead_transferido
+                        ? 'Lead reutilizado y transferido de "En desuso" a Embudo onboarding (Preston v2)'
+                        : 'Contacto y Lead ya existían, reutilizados (Preston v2)')
+                    : 'Contacto y Lead creados en Kommo (Preston v2)')
         })
 
     } catch (error) {
@@ -1030,12 +1199,22 @@ app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
             }
         }
 
-        // 3. Mover el lead a la etapa "completo" (Paso 3 finalizado)
+        // 3. Mover el lead a la etapa "completo" (Paso 3 finalizado), SALVO que el lead
+        //    esté Perdido (143): en ese caso se mantiene Perdido, no se reactiva al pasar
+        //    por el Paso 3. Las notas y archivos quedan de todas formas asociados al lead.
         let etapa_actualizada = false
+        let lead_perdido_preservado = false
         try {
-            await kommo_api.patch(`/leads/${leadId}`, { status_id: PRESTON_V2_ETAPA_COMPLETO })
-            etapa_actualizada = true
-            console.log(`Preston v2 - Lead ${leadId} movido a etapa COMPLETO (${PRESTON_V2_ETAPA_COMPLETO})`)
+            const leadResp = await kommo_api.get(`/leads/${leadId}`)
+            const statusActual = leadResp.data?.status_id
+            if (statusActual === 143) {
+                lead_perdido_preservado = true
+                console.log(`Preston v2 - Lead ${leadId} está Perdido: se preserva el estado, no se mueve a COMPLETO`)
+            } else {
+                await kommo_api.patch(`/leads/${leadId}`, { status_id: PRESTON_V2_ETAPA_COMPLETO })
+                etapa_actualizada = true
+                console.log(`Preston v2 - Lead ${leadId} movido a etapa COMPLETO (${PRESTON_V2_ETAPA_COMPLETO})`)
+            }
         } catch (stageErr) {
             console.error('Preston v2 - Error moviendo lead a COMPLETO:', stageErr.response?.data || stageErr.message)
         }
@@ -1045,7 +1224,10 @@ app.patch('/preston-v2/:leadId', uploadPrestonV2.any(), async (req, res) => {
             lead_id: leadId,
             files_uploaded,
             etapa_actualizada,
-            mensaje: 'Lead enriquecido en Kommo (Preston v2)'
+            lead_perdido_preservado,
+            mensaje: lead_perdido_preservado
+                ? 'Lead enriquecido con notas/archivos, pero se mantuvo en estado Perdido (Preston v2)'
+                : 'Lead enriquecido en Kommo (Preston v2)'
         })
 
     } catch (error) {
@@ -1838,6 +2020,93 @@ app.post('/marlaca/capi', async (req, res) => {
         })
     }
 })
+
+// =====================================================
+// PRESTON: Meta Conversions API (server-side, dedup con pixel browser-side)
+// =====================================================
+// Envía el evento Lead a todos los pixel IDs declarados en META_PRESTON_PIXEL_IDS
+// (coma-separados). El event_id se comparte con el pixel browser-side; Meta
+// deduplica dentro de la ventana de 48h.
+async function sendPrestonLeadCapi(ctx) {
+    const token = process.env.META_PRESTON_CAPI_TOKEN
+    const pixelIdsRaw = process.env.META_PRESTON_PIXEL_IDS || ''
+    const pixelIds = pixelIdsRaw.split(',').map(s => s.trim()).filter(Boolean)
+    if (!token || pixelIds.length === 0) {
+        console.warn('Preston CAPI - token o pixel IDs ausentes, no se envía evento')
+        return { sent: 0, pixels: [] }
+    }
+
+    const { event_id, event_source_url, user_data = {}, custom_data = {}, ip, user_agent } = ctx
+
+    const hashed = {}
+    if (user_data.email)      hashed.em = sha256(user_data.email)
+    if (user_data.phone)      hashed.ph = sha256(normPhone(user_data.phone))
+    if (user_data.first_name) hashed.fn = sha256(user_data.first_name)
+    if (user_data.last_name)  hashed.ln = sha256(user_data.last_name)
+    if (user_data.dni)        hashed.external_id = sha256(user_data.dni)
+    if (user_data.country)    hashed.country = sha256(user_data.country)
+    if (user_data.fbp)        hashed.fbp = user_data.fbp
+    if (user_data.fbc)        hashed.fbc = user_data.fbc
+    if (ip)                   hashed.client_ip_address = ip
+    if (user_agent)           hashed.client_user_agent = user_agent
+
+    const payload = {
+        data: [{
+            event_name: 'Lead',
+            event_time: Math.floor(Date.now() / 1000),
+            event_id,
+            event_source_url,
+            action_source: 'website',
+            user_data: hashed,
+            custom_data
+        }]
+    }
+
+    const results = await Promise.all(pixelIds.map(async pixelId => {
+        try {
+            const r = await axios.post(
+                `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${token}`,
+                payload,
+                { timeout: 8000 }
+            )
+            console.log(`Preston CAPI - Lead ${event_id} → pixel ${pixelId} (events_received=${r.data?.events_received})`)
+            return { pixelId, ok: true }
+        } catch (e) {
+            console.error(`Preston CAPI - Error enviando a pixel ${pixelId}:`, e.response?.data?.error?.message || e.message)
+            return { pixelId, ok: false, error: e.response?.data?.error?.message || e.message }
+        }
+    }))
+    return { sent: results.filter(r => r.ok).length, pixels: results }
+}
+
+// Construye el contexto para sendPrestonLeadCapi a partir del req y los datos del lead.
+// Normaliza: toma IP real detrás de proxy, user_agent, y agrega los datos ya hasheables
+// (sha256 se aplica dentro del helper).
+function buildPrestonCapiCtx(req, { event_id, nombre, apellido, telefono, dni, email, categoria, lead_id }) {
+    const b = req.body || {}
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress
+    const ua = req.headers['user-agent'] || ''
+    return {
+        event_id,
+        event_source_url: b.event_source_url || null,
+        ip,
+        user_agent: ua,
+        user_data: {
+            email: email || null,
+            phone: telefono || null,
+            first_name: nombre || null,
+            last_name: apellido || null,
+            dni: dni || null,
+            country: 'ar',
+            fbp: b.fbp || null,
+            fbc: b.fbc || null
+        },
+        custom_data: {
+            lead_event_source: categoria || 'preston',
+            lead_id: String(lead_id || '')
+        }
+    }
+}
 
 
 // =====================================================
