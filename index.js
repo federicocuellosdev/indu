@@ -2150,7 +2150,7 @@ const META_PAGE_ROUTING = {
         kommo: MARLACA_KOMMO,
         tags: ['Meta Ads']
     },
-    [process.env.AZAHARES_META_PAGE_ID || '']: {
+    [process.env.AZAHARES_META_PAGE_ID || '822404384497241']: {
         name: 'azahares',
         kommo: AZAHARES_KOMMO,
         tags: ['Meta Ads']
