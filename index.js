@@ -2135,10 +2135,24 @@ const MARLACA_KOMMO = {
     statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112380479', 10)
 }
 
+// --- Config Azahares (routing + Kommo) ----------------------------------
+// Pipeline: "Meta Ads & Web" (14641828) · Status: "Nuevo" (113131176)
+const AZAHARES_KOMMO = {
+    base: `https://${process.env.KOMMO_AZAHARES_SUBDOMINIO || 'azaharesdelparan'}.kommo.com/api/v4`,
+    token: process.env.KOMMO_AZAHARES_TOKEN,
+    pipelineId: parseInt(process.env.AZAHARES_KOMMO_PIPELINE_ID || '14641828', 10),
+    statusId: parseInt(process.env.AZAHARES_KOMMO_STATUS_ID || '113131176', 10)
+}
+
 const META_PAGE_ROUTING = {
     [process.env.MARLACA_META_PAGE_ID || '']: {
         name: 'marlaca',
         kommo: MARLACA_KOMMO,
+        tags: ['Meta Ads']
+    },
+    [process.env.AZAHARES_META_PAGE_ID || '']: {
+        name: 'azahares',
+        kommo: AZAHARES_KOMMO,
         tags: ['Meta Ads']
     }
 }
