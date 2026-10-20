@@ -47,7 +47,9 @@ app.use(cors({
             'https://talent.breakmkt.com.ar',
             'https://www.talent.breakmkt.com.ar',
             'https://marlaca-realestate.com',
-            'https://www.marlaca-realestate.com'
+            'https://www.marlaca-realestate.com',
+            'https://azaharesdelparana.com',
+            'https://www.azaharesdelparana.com'
         ]
 
         if (!origin || dominios_permitidos.indexOf(origin) !== -1) {
@@ -2400,6 +2402,69 @@ app.post('/marlaca/form', async (req, res) => {
         res.json({ success: true, contact_id: contactId, lead_id: leadId })
     } catch (error) {
         console.error('Marlaca form - error:', error.response?.data || error.message)
+        res.status(500).json({
+            success: false,
+            mensaje: 'Error al procesar el formulario',
+            detalles: error.response?.data || error.message
+        })
+    }
+})
+
+
+// =====================================================
+// AZAHARES: Formulario web (landing /) → Kommo
+// =====================================================
+// Body esperado:
+// {
+//   nombre, email?, telefono,
+//   objetivo?,      // "Para vivir" | "Inversión" | ...
+//   lote?,          // "Horizonte (desde US$45.000)" | ...
+//   mensaje?,
+//   tracking?: { utm_source, utm_campaign, utm_medium, referrer, page, ... }
+// }
+app.post('/azahares/form', async (req, res) => {
+    try {
+        const b = req.body || {}
+        const nombre = (b.nombre || '').toString().trim()
+        const email = (b.email || '').toString().trim()
+        const telefono = (b.telefono || '').toString().trim()
+        if (!nombre || !telefono) {
+            return res.status(400).json({ success: false, mensaje: 'nombre y telefono son obligatorios' })
+        }
+        const cfg = AZAHARES_KOMMO
+
+        // 1. Contacto
+        const contactId = await kommoCreateContact(cfg, { name: nombre, email, phone: telefono })
+
+        // 2. Lead en pipeline "Meta Ads & Web" (etapa Nuevo)
+        const lote = (b.lote || '').toString().trim()
+        const title = `WEB - ${nombre}${lote ? ' · ' + lote.split('(')[0].trim() : ''}`
+        const tags = ['WEB', 'Formulario home']
+        const leadId = await kommoCreateLead(cfg, { name: title, contactId, tags })
+
+        // 3. Nota con respuestas
+        const lines = ['Lead recibido del formulario web (home)']
+        lines.push('')
+        lines.push('Respuestas del formulario:')
+        if (b.objetivo) lines.push(`- ¿Para qué lo buscás?: ${b.objetivo}`)
+        if (lote) lines.push(`- Lote de interés: ${lote}`)
+        if (b.mensaje) lines.push(`- Mensaje: ${b.mensaje}`)
+        if (b.tracking && typeof b.tracking === 'object') {
+            lines.push('', 'Tracking:')
+            for (const [k, v] of Object.entries(b.tracking)) {
+                if (v !== undefined && v !== null && v !== '') lines.push(`${k}: ${v}`)
+            }
+        }
+        await kommoAddNote(cfg, leadId, lines.join('\n'))
+
+        // 4. Nota WhatsApp (link clickeable)
+        const waNote = buildWhatsAppNote([{ label: 'Teléfono', raw: telefono }])
+        if (waNote) await kommoAddNote(cfg, leadId, waNote)
+
+        console.log(`Azahares form - contact=${contactId} lead=${leadId}`)
+        res.json({ success: true, contact_id: contactId, lead_id: leadId })
+    } catch (error) {
+        console.error('Azahares form - error:', error.response?.data || error.message)
         res.status(500).json({
             success: false,
             mensaje: 'Error al procesar el formulario',
