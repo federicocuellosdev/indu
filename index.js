@@ -2237,9 +2237,24 @@ async function fetchMetaLead(leadgenId) {
     const token = process.env.META_SYSTEM_USER_TOKEN
     const version = process.env.META_GRAPH_VERSION || 'v21.0'
     if (!token) throw new Error('META_SYSTEM_USER_TOKEN no configurado')
-    const url = `https://graph.facebook.com/${version}/${leadgenId}?fields=field_data,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,platform,created_time,form_id,form{name}&access_token=${token}`
+    const url = `https://graph.facebook.com/${version}/${leadgenId}?fields=field_data,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,platform,created_time,form_id&access_token=${token}`
     const r = await axios.get(url, { timeout: 10000 })
     return r.data
+}
+
+async function fetchMetaFormName(formId) {
+    const token = process.env.META_SYSTEM_USER_TOKEN
+    const version = process.env.META_GRAPH_VERSION || 'v21.0'
+    if (!formId || !token) return null
+    try {
+        const r = await axios.get(
+            `https://graph.facebook.com/${version}/${formId}?fields=name&access_token=${token}`,
+            { timeout: 10000 }
+        )
+        return r.data && r.data.name || null
+    } catch (e) {
+        return null
+    }
 }
 
 function parseMetaLeadFields(fieldData = []) {
@@ -2276,7 +2291,7 @@ async function processLeadgen(leadgenId, pageId) {
         name: parsed.name, email: parsed.email, phone: parsed.phone, phoneAlt: parsed.phoneAlt
     })
 
-    const formName = (lead.form && lead.form.name) || lead.form_id || 'Formulario'
+    const formName = (await fetchMetaFormName(lead.form_id)) || lead.form_id || 'Formulario'
     const tags = [...route.tags, formName]
     const leadId = await kommoCreateLead(cfg, {
         name: `Meta Ads - ${formName} - ${parsed.name}`,
