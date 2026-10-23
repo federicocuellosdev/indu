@@ -2151,12 +2151,12 @@ const AZAHARES_KOMMO = {
 }
 
 // --- Config Lax (Kommo laxlaboratorio) ----------------------------------
-// Pipeline: "Tercerizados" (14548227) · Status: "Incoming leads" (112387659)
+// Pipeline: "Tercerizados" (14548227) · Status: "NUEVO" (113314631)
 const LAX_KOMMO = {
     base: `https://${process.env.KOMMO_LAX_SUBDOMINIO || 'laxlaboratorio'}.kommo.com/api/v4`,
     token: process.env.KOMMO_LAX_TOKEN,
     pipelineId: parseInt(process.env.KOMMO_LAX_PIPELINE_ID || '14548227', 10),
-    statusId: parseInt(process.env.KOMMO_LAX_STATUS_ID || '112387659', 10)
+    statusId: parseInt(process.env.KOMMO_LAX_STATUS_ID || '113314631', 10)
 }
 
 const META_PAGE_ROUTING = {
@@ -2234,9 +2234,21 @@ async function kommoCreateLead(cfg, { name, contactId, tags }) {
 }
 
 async function kommoAddNote(cfg, leadId, text) {
-    if (!text) return
-    await axios.post(`${cfg.base}/leads/${leadId}/notes`, [{
+    if (!text) return null
+    const r = await axios.post(`${cfg.base}/leads/${leadId}/notes`, [{
         entity_id: leadId,
+        note_type: 'common',
+        params: { text }
+    }], {
+        headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json; charset=utf-8' },
+        timeout: 10000
+    })
+    return r.data?._embedded?.notes?.[0]?.id ?? null
+}
+
+async function kommoUpdateNote(cfg, leadId, noteId, text) {
+    await axios.patch(`${cfg.base}/leads/${leadId}/notes`, [{
+        id: noteId,
         note_type: 'common',
         params: { text }
     }], {
@@ -2660,44 +2672,46 @@ app.post('/azahares/form', async (req, res) => {
 // LAX: Formulario web (producciones/evaluar) → Kommo
 // =====================================================
 // El PHP /api/lead.php del hosting hace forward acá después de enviar el email.
-// Tramo 1: crea contacto (dedup por email) + lead + nota con respuestas.
-// Tramo 2: si tenemos el leadId del front mapeado, agrega una nota al mismo lead;
-// si no (restart, TTL), lo loguea y responde 200 sin crear ruido.
-const LAX_FIELD_LABELS = {
-    empresa:        'Empresa / marca',
-    red:            'Web / Instagram',
-    categoria:      'Categoría',
-    tipoProyecto:   'Tipo de proyecto',
-    idea:           'Idea / detalle',
-    etapa:          'Etapa',
-    estadoMarca:    'Estado de la marca',
-    alcance:        'Alcance',
-    volumen:        'Volumen',
-    plazo:          'Plazo',
-    formula:        'Fórmula',
-    formulaDetalle: 'Fórmula (detalle)',
-    marca:          'Marca (registro)',
-    marcaNombre:    'Marca (nombre)',
-    rotulo:         'Rótulo',
-    contenido:      'Contenido neto',
-    titularidad:    'Titularidad del RNPA',
-    titularNombre:  'Titular (nombre / razón social)'
+// Tramo 1: crea contacto (dedup por email) + lead + nota con las respuestas del form.
+// Tramo 2: localiza el lead por leadId del front y ACTUALIZA la misma nota (PATCH),
+//          agregándole al final las respuestas del detalle. Si no hay mapping
+//          (restart de Render, TTL expirado), cae al flujo del tramo 1.
+// La nota solo contiene las preguntas/respuestas del formulario; los datos de
+// contacto (nombre, email, teléfono, empresa, web/IG) viven en el Contacto/Lead.
+
+const LAX_NOTE_LABELS = {
+    categoria:      '¿Qué tipo de producto querés fabricar?',
+    tipoProyecto:   '¿Qué estás buscando?',
+    idea:           '¿Qué producto tenés en mente?',
+    etapa:          '¿En qué punto está tu proyecto?',
+    estadoMarca:    '¿Ya tenés una marca?',
+    volumen:        '¿Qué volumen pensás producir?',
+    plazo:          'Momento esperado',
+    formula:        '¿Ya tenés pensada la fórmula?',
+    formulaDetalle: 'Detalle de la fórmula',
+    marca:          '¿Ya tenés pensado el nombre del producto?',
+    marcaNombre:    'Nombre del producto',
+    rotulo:         '¿Y el diseño de la etiqueta?',
+    contenido:      '¿Cuánto entra en cada envase?',
+    titularidad:    '¿A nombre de quién queda el producto?',
+    titularNombre:  'Nombre / razón social del titular'
 }
 
-function laxFormatAnswers(b) {
-    const lines = []
-    for (const [k, label] of Object.entries(LAX_FIELD_LABELS)) {
-        const v = b[k]
+// Formato: Pregunta\nRespuesta\n---\nPregunta\n...
+function laxBuildNote(payload) {
+    const blocks = []
+    for (const [k, label] of Object.entries(LAX_NOTE_LABELS)) {
+        const v = payload[k]
         if (v === undefined || v === null) continue
         const s = String(v).trim()
         if (!s) continue
-        lines.push(s.includes('\n') ? `- ${label}:\n${s}` : `- ${label}: ${s}`)
+        blocks.push(`${label}\n${s}`)
     }
-    return lines
+    return blocks.join('\n---\n')
 }
 
-// Map en memoria: leadId uuid del front → { kommoLeadId, kommoContactId, ts }
-// Se usa para que tramo 2 aterrice como nota en el mismo lead del tramo 1.
+// Map en memoria: leadId uuid del front → { kommoLeadId, kommoContactId, noteId, payload, ts }
+// Permite que el tramo 2 actualice la misma nota del tramo 1 (merge de payloads).
 const laxLeadMap = new Map()
 setInterval(() => {
     const cutoff = Date.now() - 60 * 60 * 1000  // 1h TTL
@@ -2721,73 +2735,47 @@ app.post('/lax/evaluar', async (req, res) => {
 
         const cfg = LAX_KOMMO
 
-        // --- TRAMO 2: solo agrega nota al lead ya creado ---
+        // --- TRAMO 2 con mapping: merge del payload y PATCH de la nota existente ---
         if (tramo === '2' && leadIdFront && laxLeadMap.has(leadIdFront)) {
             const entry = laxLeadMap.get(leadIdFront)
-            const noteLines = ['Detalle completado por el prospecto (tramo 2)']
-            const extras = laxFormatAnswers(b)
-            if (extras.length) {
-                noteLines.push('', 'Respuestas adicionales:')
-                noteLines.push(...extras)
+            const merged = { ...entry.payload, ...b }
+            entry.payload = merged
+            entry.ts = Date.now()
+            const text = laxBuildNote(merged)
+            if (text) {
+                if (entry.noteId) await kommoUpdateNote(cfg, entry.kommoLeadId, entry.noteId, text)
+                else entry.noteId = await kommoAddNote(cfg, entry.kommoLeadId, text)
             }
-            if (b.resumen) {
-                noteLines.push('', '--- Resumen generado por el formulario ---')
-                noteLines.push(String(b.resumen))
-            }
-            await kommoAddNote(cfg, entry.kommoLeadId, noteLines.join('\n'))
-            console.log(`Lax evaluar - tramo 2 - nota añadida a lead=${entry.kommoLeadId}`)
+            console.log(`Lax evaluar - tramo 2 - nota ${entry.noteId} actualizada en lead=${entry.kommoLeadId}`)
             return res.json({
                 success: true,
                 contact_id: entry.kommoContactId,
                 lead_id: entry.kommoLeadId,
-                action: 'note_added'
+                note_id: entry.noteId,
+                action: 'note_updated'
             })
         }
 
-        // --- TRAMO 1 (o fallback de tramo 2 sin mapping): dedupe contacto + crea lead + nota ---
+        // --- TRAMO 1 (o fallback de tramo 2 sin mapping) ---
         let contactId = await kommoFindContactByEmail(cfg, email)
-        const reused = !!contactId
         if (!contactId) {
             contactId = await kommoCreateContact(cfg, { name: nombre, email, phone: telefono })
         }
 
-        const categoria = (b.categoria || '').toString().trim()
-        const title = `WEB Evaluar - ${nombre}${categoria ? ' · ' + categoria : ''}`
-        const tags = ['WEB', 'Evaluar producciones']
-        const kommoLeadId = await kommoCreateLead(cfg, { name: title, contactId, tags })
+        const kommoLeadId = await kommoCreateLead(cfg, { name: `WEB - ${nombre}`, contactId, tags: ['WEB'] })
 
-        // Nota 1: respuestas iniciales del formulario
-        const lines = ['Lead recibido del formulario web (producciones/evaluar)']
-        if (leadIdFront) lines.push(`Front leadId: ${leadIdFront}`)
-        if (b.origen)    lines.push(`Origen: ${b.origen}`)
-        if (b.enviadoEn) lines.push(`Enviado: ${b.enviadoEn}`)
-        if (reused)      lines.push('Contacto existente reutilizado (match por email)')
-        lines.push('', 'Datos de contacto:')
-        lines.push(`- Nombre: ${nombre}`)
-        lines.push(`- Email: ${email}`)
-        if (telefono) lines.push(`- Teléfono: ${telefono}`)
-        const answers = laxFormatAnswers(b)
-        if (answers.length) {
-            lines.push('', 'Respuestas del formulario:')
-            lines.push(...answers)
-        }
-        if (tramo === '2' && b.resumen) {
-            lines.push('', '--- Resumen ---')
-            lines.push(String(b.resumen))
-        }
-        await kommoAddNote(cfg, kommoLeadId, lines.join('\n'))
+        const noteText = laxBuildNote(b)
+        const noteId = noteText ? await kommoAddNote(cfg, kommoLeadId, noteText) : null
 
-        // Nota 2: WhatsApp link clickeable
-        const waNote = buildWhatsAppNote([{ label: 'Teléfono', raw: telefono }])
-        if (waNote) await kommoAddNote(cfg, kommoLeadId, waNote)
-
-        // Guardar correlación para que un tramo 2 posterior sume nota al mismo lead
         if (leadIdFront) {
-            laxLeadMap.set(leadIdFront, { kommoLeadId, kommoContactId: contactId, ts: Date.now() })
+            laxLeadMap.set(leadIdFront, {
+                kommoLeadId, kommoContactId: contactId, noteId,
+                payload: { ...b }, ts: Date.now()
+            })
         }
 
-        console.log(`Lax evaluar - tramo ${tramo} - contact=${contactId}${reused ? ' (reuse)' : ''} lead=${kommoLeadId}`)
-        res.json({ success: true, contact_id: contactId, lead_id: kommoLeadId, action: 'created' })
+        console.log(`Lax evaluar - tramo ${tramo} - contact=${contactId} lead=${kommoLeadId} note=${noteId}`)
+        res.json({ success: true, contact_id: contactId, lead_id: kommoLeadId, note_id: noteId, action: 'created' })
     } catch (error) {
         console.error('Lax evaluar - error:', error.response?.data || error.message)
         res.status(500).json({
