@@ -5,6 +5,7 @@ const axios = require('axios')
 const crypto = require('crypto')
 const multer = require('multer')
 const nodemailer = require('nodemailer')
+const cron = require('node-cron')
 const { exchangeCodeForToken, saveStore } = require('./tiendanube/api')
 const { syncAllStores, startCron } = require('./tiendanube/cron')
 const app = express()
@@ -2351,6 +2352,136 @@ app.post('/meta/webhook', (req, res) => {
 
 
 // =====================================================
+// MARLACA: Backfill horario (safety net si falla el webhook)
+// =====================================================
+// Cada hora: pull leads del form en Meta, compara con contactos en Kommo
+// por email/teléfono normalizado, importa los faltantes.
+
+let _marlacaPageTokenCache = { token: null, expiresAt: 0 }
+
+async function getPageTokenForMarlaca() {
+    const pageId = process.env.MARLACA_META_PAGE_ID
+    const sysToken = process.env.META_SYSTEM_USER_TOKEN
+    if (!pageId || !sysToken) return null
+    if (_marlacaPageTokenCache.token && Date.now() < _marlacaPageTokenCache.expiresAt) {
+        return _marlacaPageTokenCache.token
+    }
+    const version = process.env.META_GRAPH_VERSION || 'v21.0'
+    const r = await axios.get(
+        `https://graph.facebook.com/${version}/${pageId}?fields=access_token&access_token=${sysToken}`,
+        { timeout: 10000 }
+    )
+    const token = r.data && r.data.access_token
+    if (!token) return null
+    _marlacaPageTokenCache = { token, expiresAt: Date.now() + 6 * 60 * 60 * 1000 } // 6h cache
+    return token
+}
+
+async function listMetaFormLeads(formId, pageToken) {
+    const version = process.env.META_GRAPH_VERSION || 'v21.0'
+    const all = []
+    let url = `https://graph.facebook.com/${version}/${formId}/leads?fields=id,field_data,created_time&limit=100&access_token=${pageToken}`
+    while (url) {
+        const r = await axios.get(url, { timeout: 15000 })
+        if (Array.isArray(r.data.data)) all.push(...r.data.data)
+        url = r.data.paging && r.data.paging.next
+    }
+    return all
+}
+
+async function listKommoContactsIdentities(cfg) {
+    const emails = new Set()
+    const phones = new Set() // normalized last 9 digits
+    let url = `${cfg.base}/contacts?limit=250&page=1`
+    let page = 1
+    while (url) {
+        const r = await axios.get(url, {
+            headers: { Authorization: `Bearer ${cfg.token}` },
+            timeout: 15000,
+            validateStatus: s => s === 200 || s === 204
+        })
+        if (r.status === 204) break
+        const contacts = (r.data && r.data._embedded && r.data._embedded.contacts) || []
+        for (const c of contacts) {
+            for (const cf of c.custom_fields_values || []) {
+                for (const v of cf.values || []) {
+                    if (cf.field_code === 'EMAIL' && v.value) emails.add(String(v.value).trim().toLowerCase())
+                    if (cf.field_code === 'PHONE' && v.value) {
+                        const n = normalizeIntlPhone(v.value)
+                        if (n && n.length >= 9) phones.add(n.slice(-9))
+                    }
+                }
+            }
+        }
+        page++
+        url = contacts.length < 250 ? null : `${cfg.base}/contacts?limit=250&page=${page}`
+    }
+    return { emails, phones }
+}
+
+function metaLeadIdentity(fieldData = []) {
+    const map = {}
+    for (const f of fieldData) {
+        if (f.name) map[f.name.toLowerCase()] = (f.values && f.values[0]) || ''
+    }
+    const email = (map.email || map.correo || map['correo_electrónico'] || '').trim().toLowerCase() || null
+    const phoneRaw = map.phone_number || map.phone || ''
+    const whatsappRaw = Object.entries(map).find(([k]) => /whats|celular|m[oó]vil/.test(k))?.[1] || ''
+    const phones = []
+    for (const r of [phoneRaw, whatsappRaw]) {
+        const n = normalizeIntlPhone(r)
+        if (n && n.length >= 9) phones.push(n.slice(-9))
+    }
+    return { email, phones }
+}
+
+async function marlacaHourlyBackfill() {
+    const pageId = process.env.MARLACA_META_PAGE_ID
+    const formId = process.env.MARLACA_FORM_ID || '1477737454181714'
+    if (!pageId || !MARLACA_KOMMO.token) {
+        console.log('[Marlaca backfill] skip: faltan env vars')
+        return
+    }
+    const start = Date.now()
+    try {
+        const pageToken = await getPageTokenForMarlaca()
+        if (!pageToken) { console.warn('[Marlaca backfill] no page token'); return }
+
+        const metaLeads = await listMetaFormLeads(formId, pageToken)
+        const { emails: kEmails, phones: kPhones } = await listKommoContactsIdentities(MARLACA_KOMMO)
+
+        const missing = []
+        for (const ml of metaLeads) {
+            const id = metaLeadIdentity(ml.field_data)
+            const found = (id.email && kEmails.has(id.email)) || id.phones.some(p => kPhones.has(p))
+            if (!found) missing.push(ml)
+        }
+
+        if (!missing.length) {
+            console.log(`[Marlaca backfill] OK meta=${metaLeads.length} kommo_emails=${kEmails.size} kommo_phones=${kPhones.size} missing=0 (${Date.now() - start}ms)`)
+            return
+        }
+
+        console.warn(`[Marlaca backfill] FOUND ${missing.length} leads faltantes de ${metaLeads.length} en Meta`)
+        let ok = 0, fail = 0
+        for (const ml of missing) {
+            try {
+                await processLeadgen(ml.id, pageId)
+                ok++
+            } catch (e) {
+                fail++
+                console.error(`[Marlaca backfill] fail import leadgen=${ml.id}:`, e.response?.data || e.message)
+            }
+            await new Promise(r => setTimeout(r, 300)) // gentle con Kommo
+        }
+        console.log(`[Marlaca backfill] imported=${ok} failed=${fail} total_meta=${metaLeads.length}`)
+    } catch (e) {
+        console.error('[Marlaca backfill] error:', e.response?.data || e.message)
+    }
+}
+
+
+// =====================================================
 // MARLACA: Formulario web (landing agendar/) → Kommo
 // =====================================================
 // Body esperado:
@@ -2492,6 +2623,11 @@ app.post('/azahares/form', async (req, res) => {
 // Iniciar servidor
 app.listen(PORT, () => {
     startCron()
+    // Marlaca backfill: safety net cada hora (minuto 7 para no coincidir con otros crons)
+    cron.schedule('7 * * * *', () => {
+        marlacaHourlyBackfill().catch(err => console.error('[Marlaca backfill] uncaught:', err.message))
+    })
+    console.log('[Marlaca backfill] cron registrado: cada hora al minuto 7')
     console.log(`Servidor corriendo en puerto: ${PORT}`)
     console.log('\nEndpoints Tienda Nube:')
     console.log('  GET  /callback - OAuth callback de Tienda Nube')
