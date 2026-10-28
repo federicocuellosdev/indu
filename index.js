@@ -2787,6 +2787,92 @@ app.post('/lax/evaluar', async (req, res) => {
 })
 
 
+// =====================================================
+// MAIL · Envío transaccional vía SMTP de Break
+// =====================================================
+// Config vía env vars:
+//   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS (credenciales del mail server)
+//   MAIL_API_KEY (bearer token compartido para autorizar envíos)
+//   MAIL_DEFAULT_FROM (ej. "notificaciones@breakmkt.com.ar")
+//
+// Qué enviar lo define cada IA que consuma este endpoint. Acá solo la plomería.
+let _mailTransporter = null
+function getMailTransporter() {
+    if (_mailTransporter) return _mailTransporter
+    const host = process.env.SMTP_HOST
+    const port = parseInt(process.env.SMTP_PORT || '465', 10)
+    const user = process.env.SMTP_USER
+    const pass = process.env.SMTP_PASS
+    if (!host || !user || !pass) throw new Error('SMTP_HOST / SMTP_USER / SMTP_PASS no están configurados')
+    _mailTransporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        auth: { user, pass },
+    })
+    return _mailTransporter
+}
+
+function requireMailAuth(req, res, next) {
+    const key = process.env.MAIL_API_KEY
+    if (!key) return res.status(503).json({ ok: false, error: 'MAIL_API_KEY no configurado en el servidor' })
+    const header = req.headers.authorization || ''
+    const token = header.startsWith('Bearer ') ? header.slice(7) : ''
+    if (token !== key) return res.status(401).json({ ok: false, error: 'unauthorized' })
+    next()
+}
+
+// POST /api/mail/send
+// Body: { to, subject, html?, text?, from?, from_name?, reply_to?, cc?, bcc?, attachments? }
+app.post('/api/mail/send', requireMailAuth, async (req, res) => {
+    try {
+        const b = req.body || {}
+        const to = b.to
+        const subject = (b.subject || '').toString()
+        const html = b.html ? String(b.html) : undefined
+        const text = b.text ? String(b.text) : undefined
+
+        if (!to || (Array.isArray(to) && !to.length)) return res.status(400).json({ ok: false, error: 'to es obligatorio' })
+        if (!subject) return res.status(400).json({ ok: false, error: 'subject es obligatorio' })
+        if (!html && !text) return res.status(400).json({ ok: false, error: 'html o text son obligatorios' })
+
+        const defaultFrom = process.env.MAIL_DEFAULT_FROM || process.env.SMTP_USER
+        const fromAddr = b.from || defaultFrom
+        const fromName = b.from_name || null
+        const from = fromName ? `"${fromName.replace(/"/g, "'")}" <${fromAddr}>` : fromAddr
+
+        const msg = {
+            from,
+            to,
+            subject,
+            html,
+            text,
+        }
+        if (b.reply_to) msg.replyTo = b.reply_to
+        if (b.cc) msg.cc = b.cc
+        if (b.bcc) msg.bcc = b.bcc
+        if (Array.isArray(b.attachments)) msg.attachments = b.attachments
+
+        const info = await getMailTransporter().sendMail(msg)
+        console.log(`Mail enviado · to=${JSON.stringify(to)} subject="${subject}" messageId=${info.messageId}`)
+        res.json({ ok: true, message_id: info.messageId, accepted: info.accepted, rejected: info.rejected })
+    } catch (error) {
+        console.error('Mail send error:', error && error.message)
+        res.status(500).json({ ok: false, error: error && error.message || String(error) })
+    }
+})
+
+// GET /api/mail/ping · chequeo rápido de que el transporte conecta
+app.get('/api/mail/ping', requireMailAuth, async (_req, res) => {
+    try {
+        await getMailTransporter().verify()
+        res.json({ ok: true })
+    } catch (error) {
+        res.status(500).json({ ok: false, error: error && error.message || String(error) })
+    }
+})
+
+
 // Iniciar servidor
 app.listen(PORT, () => {
     startCron()
