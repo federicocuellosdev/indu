@@ -49,6 +49,8 @@ app.use(cors({
             'https://www.talent.breakmkt.com.ar',
             'https://marlaca-realestate.com',
             'https://www.marlaca-realestate.com',
+            'https://marlacarealestate.com',
+            'https://www.marlacarealestate.com',
             'https://azaharesdelparana.com',
             'https://www.azaharesdelparana.com',
             'https://laboratoriolax.com',
