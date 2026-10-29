@@ -51,6 +51,7 @@ app.use(cors({
             'https://www.marlaca-realestate.com',
             'https://marlacarealestate.com',
             'https://www.marlacarealestate.com',
+            'https://marlaca-nextjs-git-web-astro-devmarlacas-projects.vercel.app',
             'https://azaharesdelparana.com',
             'https://www.azaharesdelparana.com',
             'https://laboratoriolax.com',
