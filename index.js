@@ -2159,6 +2159,14 @@ const LAX_KOMMO = {
     statusId: parseInt(process.env.KOMMO_LAX_STATUS_ID || '113314631', 10)
 }
 
+// Config Annika: solo notificación por email (sin Kommo — ellos gestionan su CRM aparte)
+const ANNIKA_EMAIL = {
+    to: ['ventas@annika.com.ar', 'fedecuellos@gmail.com'],
+    subject_prefix: 'Nuevo lead · Annika',
+    form_label: 'Annika - annikamerch',
+    cliente_label: 'Annika',
+}
+
 const META_PAGE_ROUTING = {
     [process.env.MARLACA_META_PAGE_ID || '']: {
         name: 'marlaca',
@@ -2168,6 +2176,11 @@ const META_PAGE_ROUTING = {
     [process.env.AZAHARES_META_PAGE_ID || '822404384497241']: {
         name: 'azahares',
         kommo: AZAHARES_KOMMO,
+        tags: ['Meta Ads']
+    },
+    [process.env.ANNIKA_META_PAGE_ID || '1668429380049620']: {
+        name: 'annika',
+        email: ANNIKA_EMAIL,
         tags: ['Meta Ads']
     }
 }
@@ -2326,16 +2339,164 @@ function parseMetaLeadFields(fieldData = []) {
     return { name, email, phone, phoneAlt, raw: fieldData }
 }
 
-async function processLeadgen(leadgenId, pageId) {
-    const route = META_PAGE_ROUTING[pageId]
-    if (!route) {
-        console.warn(`Meta webhook - page_id ${pageId} sin ruteo configurado, se descarta`)
-        return
-    }
-    const lead = await fetchMetaLead(leadgenId)
-    const parsed = parseMetaLeadFields(lead.field_data)
-    const cfg = route.kommo
+// Normaliza nombres de campos de Meta (snake_case / underscores / tildes) a label legible
+function humanizeFieldName(key) {
+    if (!key) return ''
+    return String(key)
+        .replace(/_/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^./, c => c.toUpperCase())
+}
 
+const CONTACT_FIELD_KEYS = new Set([
+    'first_name', 'last_name', 'full_name', 'nombre', 'apellido', 'apellidos', 'nombre_completo',
+    'email', 'correo',
+    'phone_number', 'phone', 'telefono', 'teléfono', 'celular', 'whatsapp', 'movil', 'móvil', 'numero', 'número'
+])
+
+function formatDateEs(iso) {
+    if (!iso) return ''
+    try {
+        const d = new Date(iso)
+        if (isNaN(d.getTime())) return iso
+        const pad = n => String(n).padStart(2, '0')
+        return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    } catch { return iso }
+}
+
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+}
+
+function buildLeadEmailHtml({ cliente, formName, lead, parsed }) {
+    const contactRows = []
+    const map = {}
+    for (const f of parsed.raw || []) {
+        if (!f.name) continue
+        map[f.name.toLowerCase()] = (f.values || []).join(', ')
+    }
+    const first = map.first_name || map.nombre || ''
+    const last = map.last_name || map.apellido || map.apellidos || ''
+    if (first) contactRows.push(['Nombre', first])
+    if (last) contactRows.push(['Apellido', last])
+    if (!first && !last && (map.full_name || map.nombre_completo)) {
+        contactRows.push(['Nombre', map.full_name || map.nombre_completo])
+    }
+    if (parsed.email) contactRows.push(['Email', parsed.email])
+    const waDigits = normalizeIntlPhone(parsed.phone)
+    if (parsed.phone) {
+        contactRows.push(['WhatsApp', waDigits
+            ? `<a href="${waLink(waDigits)}" style="color:#E13B7D;text-decoration:none;">${esc(parsed.phone)}</a>`
+            : esc(parsed.phone)])
+    }
+    if (parsed.phoneAlt && parsed.phoneAlt !== parsed.phone) {
+        contactRows.push(['Teléfono', esc(parsed.phoneAlt)])
+    }
+
+    const formRows = []
+    for (const f of parsed.raw || []) {
+        if (!f.name) continue
+        const k = f.name.toLowerCase()
+        if (CONTACT_FIELD_KEYS.has(k)) continue
+        formRows.push([humanizeFieldName(f.name), (f.values || []).join(', ') || '—'])
+    }
+
+    const originRows = []
+    if (lead.campaign_name) originRows.push(['Campaña', lead.campaign_name])
+    if (lead.adset_name) originRows.push(['Conjunto', lead.adset_name])
+    if (lead.ad_name) originRows.push(['Anuncio', lead.ad_name])
+    if (lead.platform) originRows.push(['Plataforma', lead.platform])
+
+    const renderRows = rows => rows.map(([k, v]) => `
+        <tr>
+            <td style="padding:6px 0;color:#6B7280;font-size:13px;width:38%;vertical-align:top;">${esc(k)}</td>
+            <td style="padding:6px 0;color:#111827;font-size:14px;font-weight:500;">${v}</td>
+        </tr>
+    `).join('')
+
+    const dateLabel = formatDateEs(lead.created_time)
+
+    return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nuevo lead en ${esc(cliente)}</title>
+</head>
+<body style="margin:0;padding:0;background:#F3F4F6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:32px 16px;">
+    <tr><td align="center">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFFFF;border-radius:14px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+        <tr><td style="height:6px;background:linear-gradient(90deg,#0087F2 0%,#BF4FCD 55%,#E13B7D 100%);line-height:0;font-size:0;">&nbsp;</td></tr>
+        <tr><td style="padding:28px 32px 20px 32px;">
+            <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#6B7280;font-weight:600;padding-bottom:14px;border-bottom:1px solid #E5E7EB;">Break · MCP</div>
+            <h1 style="margin:20px 0 6px 0;font-size:22px;font-weight:700;color:#111827;letter-spacing:-0.3px;">Nuevo lead en ${esc(cliente)}</h1>
+            <div style="font-size:13px;color:#6B7280;">Formulario instantáneo ${esc(formName)}${dateLabel ? ` · ${esc(dateLabel)}` : ''}</div>
+        </td></tr>
+
+        ${contactRows.length ? `
+        <tr><td style="padding:0 32px 32px 32px;">
+            <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#9CA3AF;font-weight:600;margin-bottom:8px;">Datos de contacto</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${renderRows(contactRows)}</table>
+        </td></tr>` : ''}
+
+        ${formRows.length ? `
+        <tr><td style="padding:0 32px 32px 32px;">
+            <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#9CA3AF;font-weight:600;margin-bottom:8px;">Respuestas al formulario</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${renderRows(formRows)}</table>
+        </td></tr>` : ''}
+
+        ${originRows.length ? `
+        <tr><td style="padding:0 32px 32px 32px;">
+            <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#9CA3AF;font-weight:600;margin-bottom:8px;">Origen de la pauta</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${renderRows(originRows)}</table>
+        </td></tr>` : ''}
+
+        <tr><td style="padding:0 32px 28px 32px;">
+            <div style="background:#FDF2F8;border:1px solid #FBCFE8;border-radius:10px;padding:12px 14px;font-size:12px;color:#9D174D;line-height:1.6;">
+                <strong style="color:#831843;">Lead ID:</strong> ${esc(leadgenIdFromLead(lead))}${lead.ad_id ? `<br><strong style="color:#831843;">Ad ID:</strong> ${esc(lead.ad_id)}` : ''}
+            </div>
+        </td></tr>
+
+        <tr><td style="padding:16px 32px 28px 32px;border-top:1px solid #F3F4F6;">
+            <div style="font-size:11px;color:#9CA3AF;line-height:1.5;">Mensaje enviado automáticamente por Break MCP. Si tenés dudas sobre esta notificación, respondé a este correo.</div>
+        </td></tr>
+    </table>
+    </td></tr>
+</table>
+</body>
+</html>`
+}
+
+function leadgenIdFromLead(lead) {
+    return lead.leadgen_id || lead.id || ''
+}
+
+async function sendLeadNotificationMail(route, lead, parsed) {
+    const cfg = route.email
+    if (!cfg) return
+    const formName = (await fetchMetaFormName(lead.form_id)) || cfg.form_label || lead.form_id || 'Formulario'
+    const cliente = cfg.cliente_label || route.name
+    const subject = `${cfg.subject_prefix || `Nuevo lead · ${cliente}`} · ${parsed.name}`
+    const html = buildLeadEmailHtml({ cliente, formName, lead, parsed })
+
+    const defaultFrom = process.env.MAIL_DEFAULT_FROM || process.env.SMTP_USER
+    const info = await getMailTransporter().sendMail({
+        from: `"Break MCP" <${defaultFrom}>`,
+        to: cfg.to,
+        subject,
+        html,
+    })
+    console.log(`Meta webhook (${route.name}) - mail enviado a ${JSON.stringify(cfg.to)} messageId=${info.messageId}`)
+}
+
+async function processLeadgenKommo(route, lead, parsed) {
+    const cfg = route.kommo
     const contactId = await kommoCreateContact(cfg, {
         name: parsed.name, email: parsed.email, phone: parsed.phone, phoneAlt: parsed.phoneAlt
     })
@@ -2370,6 +2531,28 @@ async function processLeadgen(leadgenId, pageId) {
     if (waNote) await kommoAddNote(cfg, leadId, waNote)
 
     console.log(`Meta webhook - lead procesado (${route.name}): contact=${contactId} lead=${leadId}`)
+}
+
+async function processLeadgen(leadgenId, pageId) {
+    const route = META_PAGE_ROUTING[pageId]
+    if (!route) {
+        console.warn(`Meta webhook - page_id ${pageId} sin ruteo configurado, se descarta`)
+        return
+    }
+    const lead = await fetchMetaLead(leadgenId)
+    lead.leadgen_id = leadgenId
+    const parsed = parseMetaLeadFields(lead.field_data)
+
+    if (route.kommo) {
+        await processLeadgenKommo(route, lead, parsed)
+    }
+    if (route.email) {
+        try {
+            await sendLeadNotificationMail(route, lead, parsed)
+        } catch (err) {
+            console.error(`Meta webhook (${route.name}) - error enviando mail:`, err && err.message)
+        }
+    }
 }
 
 // POST: recibe eventos leadgen. Valida HMAC → responde 200 inmediato → procesa async.
