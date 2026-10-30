@@ -2401,12 +2401,14 @@ function buildLeadEmailHtml({ cliente, formName, lead, parsed }) {
         contactRows.push(['Teléfono', esc(parsed.phoneAlt)])
     }
 
+    const prettyValue = (s) => String(s).replace(/_/g, ' ').trim()
     const formRows = []
     for (const f of parsed.raw || []) {
         if (!f.name) continue
         const k = f.name.toLowerCase()
         if (CONTACT_FIELD_KEYS.has(k)) continue
-        formRows.push([humanizeFieldName(f.name), (f.values || []).join(', ') || '—'])
+        const joined = (f.values || []).map(prettyValue).join(', ') || '—'
+        formRows.push([humanizeFieldName(f.name), joined])
     }
 
     const originRows = []
