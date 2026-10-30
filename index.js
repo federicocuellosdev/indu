@@ -2417,10 +2417,11 @@ function buildLeadEmailHtml({ cliente, formName, lead, parsed }) {
 
     const renderRows = rows => rows.map(([k, v]) => `
         <tr>
-            <td style="padding:6px 0;color:#6B7280;font-size:13px;width:38%;vertical-align:top;">${esc(k)}</td>
-            <td style="padding:6px 0;color:#111827;font-size:14px;font-weight:500;">${v}</td>
+            <td style="padding:14px 16px;color:#6B7280;font-size:11px;letter-spacing:1.2px;text-transform:uppercase;font-weight:700;width:40%;vertical-align:middle;border:1px solid #E5E7EB;background:#F9FAFB;">${esc(k)}</td>
+            <td style="padding:14px 16px;color:#111827;font-size:14px;font-weight:500;vertical-align:middle;border:1px solid #E5E7EB;">${v}</td>
         </tr>
     `).join('')
+    const tableAttrs = 'role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-radius:10px;overflow:hidden;"'
 
     const dateLabel = formatDateEs(lead.created_time)
 
@@ -2445,19 +2446,19 @@ function buildLeadEmailHtml({ cliente, formName, lead, parsed }) {
         ${contactRows.length ? `
         <tr><td style="padding:0 32px 32px 32px;">
             <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#9CA3AF;font-weight:600;margin-bottom:8px;">Datos de contacto</div>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${renderRows(contactRows)}</table>
+            <table ${tableAttrs}>${renderRows(contactRows)}</table>
         </td></tr>` : ''}
 
         ${formRows.length ? `
         <tr><td style="padding:0 32px 32px 32px;">
             <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#9CA3AF;font-weight:600;margin-bottom:8px;">Respuestas al formulario</div>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${renderRows(formRows)}</table>
+            <table ${tableAttrs}>${renderRows(formRows)}</table>
         </td></tr>` : ''}
 
         ${originRows.length ? `
         <tr><td style="padding:0 32px 32px 32px;">
             <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#9CA3AF;font-weight:600;margin-bottom:8px;">Origen de la pauta</div>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${renderRows(originRows)}</table>
+            <table ${tableAttrs}>${renderRows(originRows)}</table>
         </td></tr>` : ''}
 
         <tr><td style="padding:0 32px 28px 32px;">
