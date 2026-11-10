@@ -2328,16 +2328,26 @@ function parseMetaLeadFields(fieldData = []) {
         if (!f.name) continue
         map[f.name.toLowerCase()] = (f.values && f.values[0]) || ''
     }
+    // Buscador genérico: primera clave cuyo nombre matchea una regex
+    const findByRegex = (re) => {
+        for (const [k, v] of Object.entries(map)) {
+            if (v && re.test(k)) return v
+        }
+        return ''
+    }
     const first = map.first_name || map.nombre || ''
     const last = map.last_name || map.apellido || map.apellidos || ''
     const name = map.full_name || map.nombre_completo || [first, last].filter(Boolean).join(' ').trim() || 'Lead sin nombre'
-    const email = map.email || map.correo || ''
-    const phone = map.phone_number || map.phone || ''
-    // Buscar un segundo teléfono en campos custom (keywords comunes)
+    // Email: variantes ES comunes de los forms (correo_electrónico, email de contacto, etc.)
+    const email = map.email || map.correo || findByRegex(/correo|email/) || ''
+    // Teléfono principal: busca phone_number / phone estándar, y variantes ES
+    const phone = map.phone_number || map.phone || findByRegex(/(tel[eé]fono|n[uú]mero_de_tel)/) || ''
+    // Segundo teléfono (whatsapp, celular, etc.), evitando repetir el principal
     let phoneAlt = ''
     for (const [k, v] of Object.entries(map)) {
-        if (k === 'phone_number' || k === 'phone' || !v) continue
-        if (/tel[eé]fono|celular|whatsapp|m[oó]vil|n[uú]mero/.test(k)) { phoneAlt = v; break }
+        if (!v || v === phone) continue
+        if (k === 'phone_number' || k === 'phone') continue
+        if (/whats|celular|m[oó]vil/.test(k)) { phoneAlt = v; break }
     }
     return { name, email, phone, phoneAlt, raw: fieldData }
 }
@@ -2661,9 +2671,15 @@ function metaLeadIdentity(fieldData = []) {
     for (const f of fieldData) {
         if (f.name) map[f.name.toLowerCase()] = (f.values && f.values[0]) || ''
     }
-    const email = (map.email || map.correo || map['correo_electrónico'] || '').trim().toLowerCase() || null
-    const phoneRaw = map.phone_number || map.phone || ''
-    const whatsappRaw = Object.entries(map).find(([k]) => /whats|celular|m[oó]vil/.test(k))?.[1] || ''
+    const findByRegex = (re) => {
+        for (const [k, v] of Object.entries(map)) {
+            if (v && re.test(k)) return v
+        }
+        return ''
+    }
+    const email = (map.email || map.correo || findByRegex(/correo|email/) || '').trim().toLowerCase() || null
+    const phoneRaw = map.phone_number || map.phone || findByRegex(/(tel[eé]fono|n[uú]mero_de_tel)/) || ''
+    const whatsappRaw = Object.entries(map).find(([k, v]) => v && /whats|celular|m[oó]vil/.test(k))?.[1] || ''
     const phones = []
     for (const r of [phoneRaw, whatsappRaw]) {
         const n = normalizeIntlPhone(r)
