@@ -2141,7 +2141,8 @@ const MARLACA_KOMMO = {
     base: 'https://marlaca.kommo.com/api/v4',
     token: process.env.MARLACA_KOMMO_TOKEN,
     pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14547399', 10),
-    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112380479', 10)
+    statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112380479', 10),
+    metaLeadFieldId: process.env.MARLACA_KOMMO_META_LEAD_FIELD_ID ? parseInt(process.env.MARLACA_KOMMO_META_LEAD_FIELD_ID, 10) : null
 }
 
 // --- Config Azahares (routing + Kommo) ----------------------------------
@@ -2232,8 +2233,8 @@ async function kommoCreateContact(cfg, { name, email, phone, phoneAlt }) {
     return r.data._embedded.contacts[0].id
 }
 
-async function kommoCreateLead(cfg, { name, contactId, tags }) {
-    const payload = [{
+async function kommoCreateLead(cfg, { name, contactId, tags, metaLeadId }) {
+    const lead = {
         name,
         pipeline_id: cfg.pipelineId,
         status_id: cfg.statusId,
@@ -2241,12 +2242,45 @@ async function kommoCreateLead(cfg, { name, contactId, tags }) {
             contacts: [{ id: contactId }],
             tags: (tags || []).map(t => ({ name: t }))
         }
-    }]
-    const r = await axios.post(`${cfg.base}/leads`, payload, {
+    }
+    if (metaLeadId && cfg.metaLeadFieldId) {
+        lead.custom_fields_values = [{
+            field_id: cfg.metaLeadFieldId,
+            values: [{ value: String(metaLeadId) }]
+        }]
+    }
+    const r = await axios.post(`${cfg.base}/leads`, [lead], {
         headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json; charset=utf-8' },
         timeout: 10000
     })
     return r.data._embedded.leads[0].id
+}
+
+// Busca un lead existente por el custom field "Meta Lead ID". Devuelve el id o null.
+async function kommoFindLeadByMetaId(cfg, metaLeadId) {
+    if (!metaLeadId || !cfg.metaLeadFieldId) return null
+    try {
+        const r = await axios.get(`${cfg.base}/leads`, {
+            params: { query: String(metaLeadId) },
+            headers: { Authorization: `Bearer ${cfg.token}` },
+            timeout: 10000,
+            validateStatus: s => s === 200 || s === 204
+        })
+        if (r.status === 204) return null
+        const leads = r.data?._embedded?.leads || []
+        for (const l of leads) {
+            for (const cf of l.custom_fields_values || []) {
+                if (cf.field_id !== cfg.metaLeadFieldId) continue
+                for (const v of cf.values || []) {
+                    if (String(v.value) === String(metaLeadId)) return l.id
+                }
+            }
+        }
+        return null
+    } catch (e) {
+        if (e.response?.status === 204 || e.response?.status === 404) return null
+        throw e
+    }
 }
 
 async function kommoAddNote(cfg, leadId, text) {
@@ -2513,6 +2547,17 @@ async function sendLeadNotificationMail(route, lead, parsed) {
 
 async function processLeadgenKommo(route, lead, parsed) {
     const cfg = route.kommo
+    const metaLeadId = lead.leadgen_id || lead.id
+
+    // Dedup: si ya existe un lead con este meta_leadgen_id, saltear
+    if (cfg.metaLeadFieldId && metaLeadId) {
+        const existing = await kommoFindLeadByMetaId(cfg, metaLeadId)
+        if (existing) {
+            console.log(`Meta webhook - lead ya existe (${route.name}): kommo_lead=${existing} meta_leadgen=${metaLeadId}, skip`)
+            return
+        }
+    }
+
     const contactId = await kommoCreateContact(cfg, {
         name: parsed.name, email: parsed.email, phone: parsed.phone, phoneAlt: parsed.phoneAlt
     })
@@ -2522,7 +2567,8 @@ async function processLeadgenKommo(route, lead, parsed) {
     const leadId = await kommoCreateLead(cfg, {
         name: `Meta Ads - ${formName} - ${parsed.name}`,
         contactId,
-        tags
+        tags,
+        metaLeadId
     })
 
     // Nota 1: respuestas + campaña
@@ -2701,17 +2747,24 @@ async function marlacaHourlyBackfill() {
         if (!pageToken) { console.warn('[Marlaca backfill] no page token'); return }
 
         const metaLeads = await listMetaFormLeads(formId, pageToken)
+
+        // Dedup por leadgen_id (preferido) o email/phone (fallback para leads viejos sin ese field)
+        let kMetaIds = null
+        if (MARLACA_KOMMO.metaLeadFieldId) {
+            kMetaIds = await listKommoLeadsMetaIds(MARLACA_KOMMO)
+        }
         const { emails: kEmails, phones: kPhones } = await listKommoContactsIdentities(MARLACA_KOMMO)
 
         const missing = []
         for (const ml of metaLeads) {
+            if (kMetaIds && kMetaIds.has(String(ml.id))) continue  // ya procesado
             const id = metaLeadIdentity(ml.field_data)
-            const found = (id.email && kEmails.has(id.email)) || id.phones.some(p => kPhones.has(p))
-            if (!found) missing.push(ml)
+            const foundByIdentity = (id.email && kEmails.has(id.email)) || id.phones.some(p => kPhones.has(p))
+            if (!foundByIdentity) missing.push(ml)
         }
 
         if (!missing.length) {
-            console.log(`[Marlaca backfill] OK meta=${metaLeads.length} kommo_emails=${kEmails.size} kommo_phones=${kPhones.size} missing=0 (${Date.now() - start}ms)`)
+            console.log(`[Marlaca backfill] OK meta=${metaLeads.length} kommo_meta_ids=${kMetaIds?.size ?? 'n/a'} kommo_emails=${kEmails.size} kommo_phones=${kPhones.size} missing=0 (${Date.now() - start}ms)`)
             return
         }
 
@@ -2731,6 +2784,35 @@ async function marlacaHourlyBackfill() {
     } catch (e) {
         console.error('[Marlaca backfill] error:', e.response?.data || e.message)
     }
+}
+
+// Paginado: devuelve el Set de valores del custom field "Meta Lead ID" de todos los leads del pipeline.
+async function listKommoLeadsMetaIds(cfg) {
+    const ids = new Set()
+    let page = 1
+    while (true) {
+        const params = { limit: 250, page, with: '' }
+        if (cfg.pipelineId) params['filter[pipeline_id]'] = cfg.pipelineId
+        const r = await axios.get(`${cfg.base}/leads`, {
+            params,
+            headers: { Authorization: `Bearer ${cfg.token}` },
+            timeout: 20000,
+            validateStatus: s => s === 200 || s === 204
+        })
+        if (r.status === 204) break
+        const leads = r.data?._embedded?.leads || []
+        for (const l of leads) {
+            for (const cf of l.custom_fields_values || []) {
+                if (cf.field_id !== cfg.metaLeadFieldId) continue
+                for (const v of cf.values || []) {
+                    if (v.value) ids.add(String(v.value))
+                }
+            }
+        }
+        if (leads.length < 250) break
+        page++
+    }
+    return ids
 }
 
 
