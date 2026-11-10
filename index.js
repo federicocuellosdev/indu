@@ -2164,7 +2164,7 @@ const LAX_KOMMO = {
 
 // Config Annika: solo notificación por email (sin Kommo — ellos gestionan su CRM aparte)
 const ANNIKA_EMAIL = {
-    to: ['ventas@annika.com.ar', 'fedecuellos@gmail.com'],
+    to: ['ventas@annika.com.ar'],
     subject_prefix: 'Nuevo lead · Annika',
     form_label: 'Annika - annikamerch',
     cliente_label: 'Annika',
