@@ -2142,7 +2142,8 @@ const MARLACA_KOMMO = {
     token: process.env.MARLACA_KOMMO_TOKEN,
     pipelineId: parseInt(process.env.MARLACA_KOMMO_PIPELINE_ID || '14547399', 10),
     statusId: parseInt(process.env.MARLACA_KOMMO_STATUS_ID || '112380479', 10),
-    metaLeadFieldId: process.env.MARLACA_KOMMO_META_LEAD_FIELD_ID ? parseInt(process.env.MARLACA_KOMMO_META_LEAD_FIELD_ID, 10) : null
+    metaLeadFieldId: process.env.MARLACA_KOMMO_META_LEAD_FIELD_ID ? parseInt(process.env.MARLACA_KOMMO_META_LEAD_FIELD_ID, 10) : null,
+    defaultCountry: 'ES'
 }
 
 // --- Config Azahares (routing + Kommo) ----------------------------------
@@ -2200,15 +2201,46 @@ function normalizeIntlPhone(raw) {
     return n
 }
 
+// Normaliza un teléfono asumiendo España (país de Marlaca). Devuelve string "+NN..." o null.
+// Reglas (en orden):
+// - Quitar todo lo que no sea dígito ni '+'
+// - Si empieza con "00", reemplazar por "+"
+// - Si queda sin '+' y tiene 9 dígitos empezando con 6/7/8/9 → prefijar "+34"
+// - Si empieza con "34" y tiene 11 dígitos → prefijar "+"
+// - Validación final: debe tener '+' y entre 8 y 15 dígitos; si no, null
+function normalizeESPhone(raw) {
+    if (raw == null) return null
+    let s = String(raw).replace(/[^\d+]/g, '')
+    if (!s) return null
+    if (s.startsWith('00')) s = '+' + s.slice(2)
+    if (!s.startsWith('+')) {
+        if (/^[6789]\d{8}$/.test(s)) s = '+34' + s
+        else if (/^34\d{9}$/.test(s)) s = '+' + s
+    }
+    if (!s.startsWith('+')) return null
+    const digits = s.slice(1)
+    if (!/^\d{8,15}$/.test(digits)) return null
+    return s
+}
+
 function waLink(digits) {
     return `https://wa.me/${digits}`
 }
 
 function buildWhatsAppNote(phones) {
-    // phones: [{ label, raw }, ...]  → nota con links clickeables
-    const valid = (phones || [])
-        .map(p => ({ label: p.label, raw: p.raw, digits: normalizeIntlPhone(p.raw) }))
-        .filter(p => p.digits)
+    // phones: [{ label, raw }, ...]  → nota con links clickeables (usa normalizeESPhone cuando aplica)
+    const valid = []
+    const seen = new Set()
+    for (const p of phones || []) {
+        if (!p || !p.raw) continue
+        // Preferimos normalización española (devuelve "+..."); fallback a normalizeIntlPhone.
+        const intl = normalizeESPhone(p.raw)
+        const digits = intl ? intl.slice(1) : normalizeIntlPhone(p.raw)
+        if (!digits) continue
+        if (seen.has(digits)) continue
+        seen.add(digits)
+        valid.push({ label: p.label, raw: p.raw, digits })
+    }
     if (!valid.length) return null
     const lines = ['Para hablar por WhatsApp, hacé clic en el enlace:', '--']
     for (const p of valid) {
@@ -2219,9 +2251,36 @@ function buildWhatsAppNote(phones) {
 }
 
 async function kommoCreateContact(cfg, { name, email, phone, phoneAlt }) {
+    // Normaliza según el país default del cfg (por ahora ES para Marlaca). Para otros clientes
+    // sigue el comportamiento legacy (guardar tal cual).
+    // Pref: si WhatsApp del usuario (phoneAlt) normaliza bien → va PRIMERO como MOB (el bot
+    // de Kommo escribe al primero). Meta queda segundo como WORK. Si WhatsApp del user no
+    // parsea, Meta se queda como MOB principal y el texto raw del user queda en la nota de respuestas.
     const phoneValues = []
-    if (phone) phoneValues.push({ value: phone, enum_code: 'MOB' })
-    if (phoneAlt && phoneAlt !== phone) phoneValues.push({ value: phoneAlt, enum_code: 'WORK' })
+    const seen = new Set()
+    const push = (val, code) => {
+        if (!val) return
+        const key = val.replace(/\D/g, '')
+        if (!key || seen.has(key)) return
+        seen.add(key)
+        phoneValues.push({ value: val, enum_code: code })
+    }
+
+    if (cfg && cfg.defaultCountry === 'ES') {
+        const metaN = normalizeESPhone(phone)
+        const waN = normalizeESPhone(phoneAlt)
+        if (waN) {
+            push(waN, 'MOB')               // WhatsApp del usuario como principal
+            push(metaN, 'WORK')             // Meta como secundario
+        } else {
+            push(metaN, 'MOB')              // sin WhatsApp usable → Meta principal
+        }
+    } else {
+        // Legacy: sin normalización fuerte
+        push(phone, 'MOB')
+        push(phoneAlt, 'WORK')
+    }
+
     const custom = []
     if (phoneValues.length) custom.push({ field_code: 'PHONE', values: phoneValues })
     if (email) custom.push({ field_code: 'EMAIL', values: [{ value: email, enum_code: 'WORK' }] })
